@@ -3,7 +3,6 @@ import logging
 
 import discord
 from discord.ext import commands
-from discord import app_commands
 
 from config import Config
 from database import Database
@@ -28,74 +27,58 @@ COGS = [
 
 async def _register_persistent_views():
     """
-    Регистрирует все persistent views при старте бота.
+    Регистрирует все persistent views ДО bot.start().
 
-    Discord.py требует вызова bot.add_view() для каждого view с timeout=None
-    ПЕРЕД тем как бот начнёт принимать interactions. Без этого нажатие на
-    старые кнопки (из сообщений до рестарта) даёт «Ошибка взаимодействия».
+    Вызывается ПОСЛЕ загрузки когов (чтобы импорты работали) но ДО подключения к Discord.
+    bot.add_view() регистрирует обработчики для кнопок из старых сообщений.
+    Без этого любая кнопка из сообщения до рестарта даёт «Ошибка взаимодействия».
 
-    Что регистрируем:
-      1. LangSelectView — кнопки выбора языка при !register
-         (custom_id: lang_ru, lang_en)
-      2. CreateRoomView — панель выбора режима/размера (!create без аргументов)
-         (custom_id: create_{size}_{mode}, create_1_team)
-      3. RoomView — кнопки внутри каждой активной комнаты
-         (custom_id: start_btn_{id}, exit_room_{id}, vote_*_{id}, …)
-         Для каждой комнаты нужен отдельный экземпляр с её room_id.
-      4. JoinRoomView — кнопка «Присоединиться» в лобби
-         (custom_id: join_room_{id})
+    ВАЖНО: все View передаваемые сюда должны иметь timeout=None — это требование discord.py
+    для persistent views. View с timeout != None вызовет ValueError.
     """
     from cogs.register import LangSelectView, _PendingProxy
     from cogs.rooms import CreateRoomView, RoomView, JoinRoomView
 
-    # 1. LangSelectView — один экземпляр (static custom_ids: lang_ru, lang_en)
-    #    nickname не важен при восстановлении — callback перечитывает его из message
+    # 1. LangSelectView (custom_id: lang_ru, lang_en)
     bot.add_view(LangSelectView("_restore_", 0, _PendingProxy({}, 0)))
 
-    # 2. CreateRoomView — один экземпляр (static custom_ids: create_{size}_{mode})
+    # 2. CreateRoomView (custom_id: create_{size}_{mode}, create_1_team)
     bot.add_view(CreateRoomView())
 
-    # 3. RoomView и JoinRoomView — по одному экземпляру на каждую активную комнату
-    active_rooms = await bot.db.get_open_rooms()
-    started_rooms = await bot.db.get_started_rooms()
-    all_rooms = {r["room_id"]: r for r in (active_rooms + started_rooms)}
-
-    # Добавляем «full» и «picking» комнаты тоже
+    # 3. RoomView + JoinRoomView — по одному на каждую активную комнату в БД
     try:
-        import asyncpg  # noqa
-        extra_rows = await bot.db.pool.fetch(
-            "SELECT * FROM rooms WHERE status IN ('full','picking','awaiting_screenshot')"
+        all_room_rows = await bot.db.pool.fetch(
+            "SELECT * FROM rooms WHERE status IN ('waiting','full','picking','started','awaiting_screenshot')"
         )
-        for r in extra_rows:
-            all_rooms[r["room_id"]] = dict(r)
     except Exception as e:
-        log.warning(f"Could not fetch extra rooms for view restore: {e}")
+        log.warning(f"Could not fetch rooms for persistent view restore: {e}")
+        all_room_rows = []
 
-    for room_id, room in all_rooms.items():
-        status = room["status"]
-        mode = room.get("mode", "team")
-        size = room.get("size", 4)
+    count = 0
+    for row in all_room_rows:
+        room_id = row["room_id"]
+        status = row["status"]
+        mode = row["mode"] or "team"
+        size = row["size"] or 4
+        embed_msg_id = row["embed_message_id"]
 
-        # RoomView для канала комнаты
         bot.add_view(
             RoomView(bot, room_id, room_status=status, room_mode=mode, room_size=size),
-            message_id=room.get("embed_message_id"),
+            message_id=embed_msg_id,
         )
 
-        # JoinRoomView для лобби (только открытые комнаты)
         if status == "waiting":
             bot.add_view(JoinRoomView(room_id, size, mode, is_full=False))
 
-    log.info(f"Persistent views registered ({len(all_rooms)} active rooms)")
+        count += 1
+
+    log.info(f"Persistent views registered ({count} active rooms)")
 
 
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     log.info(f"Guild ID: {Config.GUILD_ID}")
-
-    await _register_persistent_views()
-
     try:
         guild = discord.Object(id=Config.GUILD_ID)
         bot.tree.copy_global_to(guild=guild)
@@ -154,7 +137,6 @@ async def help_cmd(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 
-# Slash-команды для подсказок
 @bot.tree.command(name="register", description="Зарегистрироваться: !register <ник>")
 async def slash_register(interaction: discord.Interaction):
     await interaction.response.send_message("Используй: `!register <твой_ник>`", ephemeral=True)
@@ -190,6 +172,9 @@ async def main():
         for cog in COGS:
             await bot.load_extension(cog)
             log.info(f"Loaded {cog}")
+        # Регистрируем persistent views ПОСЛЕ загрузки когов но ДО bot.start()
+        # Это гарантирует: 1) импорты работают  2) views зарегистрированы до первого interaction
+        await _register_persistent_views()
         await bot.start(Config.TOKEN)
 
 
