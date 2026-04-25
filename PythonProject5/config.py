@@ -8,10 +8,11 @@ class Config:
     TOKEN: str = os.getenv("DISCORD_TOKEN", "")
     GUILD_ID: int = int(os.getenv("GUILD_ID", "0"))
     CATEGORY_NAME: str = os.getenv("CATEGORY_NAME", "Игровые комнаты")
-    ADMIN_CHANNEL_NAME: str = os.getenv("ADMIN_CHANNEL_NAME", "reports")
-    RESULTS_CHANNEL_NAME: str = os.getenv("RESULTS_CHANNEL_NAME", "результаты-матчей")
-    LOBBY_CHANNEL_NAME: str = os.getenv("LOBBY_CHANNEL_NAME", "поиск-игры🟢")
+    ADMIN_CHANNEL_NAME: str = os.getenv("ADMIN_CHANNEL_NAME", "📌・¦・admin")
+    RESULTS_CHANNEL_NAME: str = os.getenv("RESULTS_CHANNEL_NAME", "✅・¦・match-results")
+    LOBBY_CHANNEL_NAME: str = os.getenv("LOBBY_CHANNEL_NAME", "🔎・¦・search-game")
     MODERATOR_ROLE_NAME: str = os.getenv("MODERATOR_ROLE_NAME", "Модератор")
+    PLAY_CHANNEL_NAME: str = os.getenv("PLAY_CHANNEL_NAME", "𝐏𝐋𝐀𝐘🟢")
     DB_PATH: str = os.getenv("DB_PATH", "bot.db")
     STARTING_ELO: int = 0
     NEWCOMER_GAMES: int = 10

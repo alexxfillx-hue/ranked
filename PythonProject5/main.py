@@ -3,6 +3,7 @@ import logging
 
 import discord
 from discord.ext import commands
+from discord import app_commands
 
 from config import Config
 from database import Database
@@ -29,6 +30,13 @@ COGS = [
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     log.info(f"Guild ID: {Config.GUILD_ID}")
+    try:
+        guild = discord.Object(id=Config.GUILD_ID)
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+        log.info("Slash commands synced")
+    except Exception as e:
+        log.warning(f"Could not sync slash commands: {e}")
 
 
 @bot.event
@@ -38,23 +46,20 @@ async def on_command_error(ctx: commands.Context, error):
     elif isinstance(error, commands.BadArgument):
         await ctx.send("⚠️ Неверный тип аргумента.")
     elif isinstance(error, commands.CommandNotFound):
-        await ctx.send("❓ Неизвестная команда. Используй `!help` для списка команд.")
+        pass
     else:
         log.exception(f"Command error in {ctx.command}", exc_info=error)
 
 
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context):
-    embed = discord.Embed(
-        title="📖  Команды бота",
-        color=0x5865F2,
-    )
+    embed = discord.Embed(title="📖  Команды бота", color=0x5865F2)
     cmds = [
-        ("!register <ник>", "Зарегистрироваться (вписать игровой ник)"),
+        ("!register <ник>", "Зарегистрироваться"),
         ("!rename <новый_ник>", "Сменить игровой ник"),
-        ("!create [1/2/3/4]", "Создать комнату (по умолч. 4v4)"),
-        ("!create1 / !create2 / !create4", "Быстрое создание по размеру"),
-        ("!queue [1/2/3/4]  или  !q", "Найти комнату в очереди"),
+        ("!ranks", "Список всех рангов и ELO"),
+        ("!create [1/2/3/4] [team/random/cap]", "Создать комнату"),
+        ("!queue [1/2/3/4] [режим]  или  !q", "Найти комнату в очереди"),
         ("!exit", "Выйти из комнаты"),
         ("!kick @игрок", "Кикнуть игрока (капитан)"),
         ("!start", "Начать игру (оба капитана)"),
@@ -67,10 +72,42 @@ async def help_cmd(ctx: commands.Context):
         ("!mod_kick @игрок", "[Мод] Кикнуть из комнаты"),
         ("!mod_end #room_id", "[Мод] Расформировать игру"),
         ("!mod_captain @игрок", "[Мод] Переназначить капитана"),
+        ("!plus @игрок <кол-во>", "[Мод] Прибавить ELO"),
+        ("!minus @игрок <кол-во>", "[Мод] Отнять ELO"),
     ]
     for name, desc in cmds:
         embed.add_field(name=f"`{name}`", value=desc, inline=False)
     await ctx.send(embed=embed)
+
+
+# Slash-команды для подсказок
+@bot.tree.command(name="register", description="Зарегистрироваться: !register <ник>")
+async def slash_register(interaction: discord.Interaction):
+    await interaction.response.send_message("Используй: `!register <твой_ник>`", ephemeral=True)
+
+@bot.tree.command(name="ranks", description="Список всех рангов и ELO: !ranks")
+async def slash_ranks(interaction: discord.Interaction):
+    await interaction.response.send_message("Используй: `!ranks`", ephemeral=True)
+
+@bot.tree.command(name="create", description="Создать игровую комнату: !create 4 team")
+async def slash_create(interaction: discord.Interaction):
+    await interaction.response.send_message("Используй: `!create [1/2/3/4] [team/random/cap]`", ephemeral=True)
+
+@bot.tree.command(name="queue", description="Войти в очередь поиска игры: !q 4 random")
+async def slash_queue(interaction: discord.Interaction):
+    await interaction.response.send_message("Используй: `!q <размер> <режим>`", ephemeral=True)
+
+@bot.tree.command(name="profile", description="Посмотреть профиль игрока: !profile")
+async def slash_profile(interaction: discord.Interaction):
+    await interaction.response.send_message("Используй: `!profile` или `!profile @игрок`", ephemeral=True)
+
+@bot.tree.command(name="top", description="Топ-10 игроков по ELO: !top")
+async def slash_top(interaction: discord.Interaction):
+    await interaction.response.send_message("Используй: `!top`", ephemeral=True)
+
+@bot.tree.command(name="help", description="Список всех команд бота: !help")
+async def slash_help(interaction: discord.Interaction):
+    await interaction.response.send_message("Используй: `!help`", ephemeral=True)
 
 
 async def main():

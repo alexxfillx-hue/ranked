@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS players (
     games_played  INTEGER DEFAULT 0,
     win_streak    INTEGER DEFAULT 0,
     penalty_games INTEGER DEFAULT 0,
+    report_count  INTEGER DEFAULT 0,
     lang          TEXT    DEFAULT 'ru',
     registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -442,7 +443,38 @@ class Database:
                 "INSERT INTO reports (reporter_id,reported_id,reason) VALUES (?,?,?)",
                 (reporter_id, reported_id, reason),
             )
+            await db.execute(
+                "UPDATE players SET report_count = report_count + 1 WHERE discord_id=?",
+                (reported_id,),
+            )
             await db.commit()
+
+    async def get_report_count(self, discord_id: int) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            async with db.execute(
+                "SELECT report_count FROM players WHERE discord_id=?", (discord_id,)
+            ) as cur:
+                row = await cur.fetchone()
+                return row[0] if row else 0
+
+    async def mod_adjust_elo(self, discord_id: int, amount: int) -> int:
+        """Прибавляет или вычитает ELO модератором. Возвращает новое ELO."""
+        pl = await self.get_player(discord_id)
+        if not pl:
+            return -1
+        new_elo = max(0, pl["elo"] + amount)
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE players SET elo=? WHERE discord_id=?",
+                (new_elo, discord_id),
+            )
+            await db.execute(
+                """INSERT INTO elo_history (discord_id, elo_before, elo_after, change)
+                   VALUES (?,?,?,?)""",
+                (discord_id, pl["elo"], new_elo, amount),
+            )
+            await db.commit()
+        return new_elo
 
     async def reports_today(self, reporter_id: int) -> int:
         async with aiosqlite.connect(self.path) as db:
