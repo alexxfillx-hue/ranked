@@ -10,12 +10,11 @@ class LangButton(discord.ui.Button):
     def __init__(self, lang: str, nickname: str):
         labels = {"ru": "🇷🇺 Русский", "en": "🇬🇧 English"}
         styles = {"ru": discord.ButtonStyle.primary, "en": discord.ButtonStyle.secondary}
-        # ВАЖНО: custom_id должен быть СТАТИЧЕСКИМ (без timestamp и uid),
-        # иначе после рестарта бота Discord присылает interaction с «мёртвой» кнопкой.
-        # Двойной вызов !register решается через _pending_registration + удалением старого сообщения.
         super().__init__(
             label=labels[lang],
             style=styles[lang],
+            # custom_id СТАТИЧЕСКИЙ — без timestamp/uid.
+            # Это обязательно для persistent views (bot.add_view).
             custom_id=f"lang_{lang}",
         )
         self.lang = lang
@@ -24,7 +23,29 @@ class LangButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         db = interaction.client.db
         lang = self.lang
+
+        # Получаем nickname: либо из self (свежая кнопка), либо из embed (после рестарта бота).
+        # После рестарта LangSelectView создаётся с nickname="_restore_",
+        # поэтому читаем реальный ник из embed сообщения.
         nickname = self.nickname
+        if nickname == "_restore_":
+            try:
+                embeds = interaction.message.embeds
+                if embeds and embeds[0].description:
+                    # Описание содержит строку "Ник / Nickname: **alekz**"
+                    import re
+                    match = re.search(r"\*\*(.+?)\*\*", embeds[0].description)
+                    if match:
+                        nickname = match.group(1)
+            except Exception:
+                pass
+
+        if not nickname or nickname == "_restore_":
+            await interaction.response.edit_message(
+                content="⚠️ Не удалось определить ник. Напиши `!register <ник>` заново.",
+                embed=None, view=None,
+            )
+            return
 
         # Снимаем pending вне зависимости от исхода
         reg_cog = interaction.client.cogs.get("Register")
@@ -55,7 +76,6 @@ class LangButton(discord.ui.Button):
             except discord.Forbidden:
                 pass
 
-            reg_cog = interaction.client.cogs.get("Register")
             if reg_cog:
                 await reg_cog._sync_rank_role(interaction.user, Config.STARTING_ELO)
 
@@ -73,7 +93,8 @@ class LangButton(discord.ui.Button):
 
 class LangSelectView(discord.ui.View):
     def __init__(self, nickname: str, uid: int, pending_set):
-        # timeout=None обязателен для persistent view — иначе bot.add_view() падает с ValueError
+        # timeout=None ОБЯЗАТЕЛЕН для persistent view.
+        # View с любым другим timeout вызовет ValueError в bot.add_view().
         super().__init__(timeout=None)
         self.uid = uid
         self._pending_set = pending_set
@@ -84,8 +105,8 @@ class LangSelectView(discord.ui.View):
 class Register(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Словарь discord_id → message_id открытого выбора языка.
-        # Позволяет удалить старое сообщение если игрок вызвал !register снова.
+        # dict: discord_id → message_id сообщения с выбором языка.
+        # Позволяет удалить старое сообщение если игрок снова вызвал !register.
         self._pending_registration: dict[int, int] = {}
 
     def _guild_check(self, ctx):
@@ -183,9 +204,8 @@ class Register(commands.Cog):
             ),
             color=0x5865F2,
         )
-        # pending_set передаём как set-обёртку для совместимости с on_timeout
-        pending_set_proxy = _PendingProxy(self._pending_registration, ctx.author.id)
-        view = LangSelectView(nickname, ctx.author.id, pending_set_proxy)
+        proxy = _PendingProxy(self._pending_registration, ctx.author.id)
+        view = LangSelectView(nickname, ctx.author.id, proxy)
         msg = await ctx.send(embed=embed, view=view)
         self._pending_registration[ctx.author.id] = msg.id
 
@@ -227,8 +247,8 @@ class Register(commands.Cog):
 
 class _PendingProxy:
     """
-    Прокси-объект: передаётся в LangSelectView как 'pending_set'.
-    При вызове .discard(uid) — удаляет uid из словаря _pending_registration.
+    Прокси для совместимости LangSelectView с dict-хранилищем pending.
+    Передаётся как pending_set в LangSelectView.
     """
     def __init__(self, mapping: dict, uid: int):
         self._mapping = mapping
