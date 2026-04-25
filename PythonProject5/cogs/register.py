@@ -2,18 +2,22 @@ import discord
 from discord.ext import commands
 from config import Config, RANKS, get_rank
 from utils.i18n import t
+import time
 
 
 class LangButton(discord.ui.Button):
     """Кнопка выбора языка при регистрации."""
 
-    def __init__(self, lang: str, nickname: str):
+    def __init__(self, lang: str, nickname: str, uid: int):
         labels = {"ru": "🇷🇺 Русский", "en": "🇬🇧 English"}
         styles = {"ru": discord.ButtonStyle.primary, "en": discord.ButtonStyle.secondary}
+        # uid + timestamp делает custom_id уникальным для каждого вызова !register
+        # Это предотвращает конфликт кнопок если игрок вызвал команду дважды
+        unique = f"{uid}_{int(time.time())}"
         super().__init__(
             label=labels[lang],
             style=styles[lang],
-            custom_id=f"lang_{lang}_{nickname[:20]}",
+            custom_id=f"lang_{lang}_{nickname[:16]}_{unique}",
         )
         self.lang = lang
         self.nickname = nickname
@@ -22,6 +26,11 @@ class LangButton(discord.ui.Button):
         db = interaction.client.db
         lang = self.lang
         nickname = self.nickname
+
+        # Снимаем pending вне зависимости от исхода
+        reg_cog = interaction.client.cogs.get("Register")
+        if reg_cog:
+            reg_cog._pending_registration.discard(interaction.user.id)
 
         existing = await db.get_player(interaction.user.id)
         if existing:
@@ -64,19 +73,26 @@ class LangButton(discord.ui.Button):
 
 
 class LangSelectView(discord.ui.View):
-    def __init__(self, nickname: str):
+    def __init__(self, nickname: str, uid: int, pending_set: set):
         super().__init__(timeout=120)
-        self.add_item(LangButton("ru", nickname))
-        self.add_item(LangButton("en", nickname))
+        self.uid = uid
+        self._pending_set = pending_set
+        self.add_item(LangButton("ru", nickname, uid))
+        self.add_item(LangButton("en", nickname, uid))
 
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
+        # Снимаем pending чтобы игрок мог вызвать !register снова после истечения 120 сек
+        self._pending_set.discard(self.uid)
 
 
 class Register(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # Множество discord_id у которых уже открыт выбор языка.
+        # Не даёт отправить второй embed если игрок нажал !register дважды.
+        self._pending_registration: set[int] = set()
 
     def _guild_check(self, ctx):
         return ctx.guild and ctx.guild.id == Config.GUILD_ID
@@ -146,6 +162,15 @@ class Register(commands.Cog):
             )
             return
 
+        # Защита от двойного вызова: если уже ждём выбор языка — не шлём снова
+        if ctx.author.id in self._pending_registration:
+            await ctx.send(
+                "⏳ Ты уже выбираешь язык! Нажми одну из кнопок выше. / "
+                "You already have a language selection open! Click one of the buttons above.",
+                delete_after=8,
+            )
+            return
+
         taken = await db.get_player_by_username(nickname)
         if taken:
             await ctx.send(
@@ -154,6 +179,7 @@ class Register(commands.Cog):
             )
             return
 
+        self._pending_registration.add(ctx.author.id)
         embed = discord.Embed(
             title="🌐 Выбери язык / Choose your language",
             description=(
@@ -163,7 +189,7 @@ class Register(commands.Cog):
             ),
             color=0x5865F2,
         )
-        view = LangSelectView(nickname)
+        view = LangSelectView(nickname, ctx.author.id, self._pending_registration)
         await ctx.send(embed=embed, view=view)
 
     @commands.command(name="rename")
