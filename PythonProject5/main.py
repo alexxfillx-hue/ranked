@@ -51,6 +51,14 @@ async def on_command_error(ctx: commands.Context, error):
         log.exception(f"Command error in {ctx.command}", exc_info=error)
 
 
+@bot.command(name="cats")
+async def cats_cmd(ctx: commands.Context):
+    lines = []
+    for cat in ctx.guild.categories:
+        lines.append(f"`{repr(cat.name)}` — id:{cat.id}")
+    await ctx.send("\n".join(lines) or "Нет категорий")
+
+
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context):
     embed = discord.Embed(title="📖  Команды бота", color=0x5865F2)
