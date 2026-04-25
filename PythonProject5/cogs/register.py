@@ -29,7 +29,7 @@ class LangButton(discord.ui.Button):
         # Снимаем pending вне зависимости от исхода
         reg_cog = interaction.client.cogs.get("Register")
         if reg_cog:
-            reg_cog._pending_registration.discard(interaction.user.id)
+            reg_cog._pending_registration.pop(interaction.user.id, None)
 
         existing = await db.get_player(interaction.user.id)
         if existing:
@@ -72,18 +72,13 @@ class LangButton(discord.ui.Button):
 
 
 class LangSelectView(discord.ui.View):
-    def __init__(self, nickname: str, uid: int, pending_set: set):
-        super().__init__(timeout=120)
+    def __init__(self, nickname: str, uid: int, pending_set):
+        # timeout=None обязателен для persistent view — иначе bot.add_view() падает с ValueError
+        super().__init__(timeout=None)
         self.uid = uid
         self._pending_set = pending_set
         self.add_item(LangButton("ru", nickname))
         self.add_item(LangButton("en", nickname))
-
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        # Снимаем pending чтобы игрок мог вызвать !register снова после истечения 120 сек
-        self._pending_set.discard(self.uid)
 
 
 class Register(commands.Cog):
