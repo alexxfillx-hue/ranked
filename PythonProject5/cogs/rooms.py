@@ -265,7 +265,7 @@ class JoinButton(discord.ui.Button):
                 await db.update_room_status(self.room_id, "full")
                 await rooms_cog._assign_team2_captain(self.room_id)
                 if channel:
-                    await channel.send("🎯 Комната заполнена! Капитаны, нажмите **✅ Ready** затем **▶ Start**")
+                    await channel.send("🎯 Комната заполнена! Капитаны, нажмите **▶ Start** чтобы начать!")
 
         if rooms_cog:
             await rooms_cog._refresh_room_embed(self.room_id)
@@ -497,7 +497,7 @@ class PickTeamButton(discord.ui.Button):
             await db.update_room_status(self.room_id, "full")
             await rooms_cog._assign_team2_captain(self.room_id)
             if channel:
-                await channel.send("🎯 Команды сформированы! Капитаны, нажмите **Ready** и **▶ Start**")
+                await channel.send("🎯 Команды сформированы! Капитаны, нажмите **▶ Start** чтобы начать!")
                 await rooms_cog._announce_strong_side(channel, self.room_id)
 
         if rooms_cog:
@@ -629,9 +629,7 @@ class RoomView(discord.ui.View):
             self.add_item(ExitButton(room_id))
             self.add_item(ReportRoomButton(room_id, row=1))
         else:
-            # До старта — Ready + Start + выбор команды (если team и не 1v1) + выход + репорт
-            self.add_item(ReadyButton(1, room_id))
-            self.add_item(ReadyButton(2, room_id))
+            # До старта — Start + выбор команды (если team и не 1v1) + выход + репорт
             self.add_item(StartButton(room_id))
             if room_mode == "team" and room_size > 1:
                 self.add_item(PickTeamButton(1, room_id))
@@ -1245,7 +1243,7 @@ class Rooms(commands.Cog):
                 await db.update_room_status(room_id, "full")
                 await self._assign_team2_captain(room_id)
                 if channel:
-                    await channel.send("🎯 Комната заполнена! Капитаны, нажмите **✅ Ready** затем **▶ Start**")
+                    await channel.send("🎯 Комната заполнена! Капитаны, нажмите **▶ Start** чтобы начать!")
 
         await self._refresh_room_embed(room_id)
         if channel:
@@ -1281,6 +1279,7 @@ class Rooms(commands.Cog):
         await self._refresh_lobby()
 
         if channel:
+            t1_mentions = " ".join(f"<@{p['discord_id']}>" for p in team1)
             t2_mentions = " ".join(f"<@{p['discord_id']}>" for p in team2)
             embed = discord.Embed(
                 title="🎲 Команды сформированы рандомно!",
@@ -1290,7 +1289,7 @@ class Rooms(commands.Cog):
             embed.add_field(name=f"🔴 Команда 2 (капитан: <@{cap2['discord_id']}>)", value=t2_mentions, inline=False)
             await channel.send(embed=embed)
             await self._announce_strong_side(channel, room_id)
-            await channel.send("✅ Капитаны, нажмите **Ready** затем **▶ Start** чтобы начать!")
+            await channel.send("✅ Капитаны, нажмите **▶ Start** чтобы начать!")
 
     # ── Cap mode ─────────────────────────────────────────────────
 
@@ -1423,7 +1422,7 @@ class Rooms(commands.Cog):
             embed.add_field(name="🔴 Команда 2", value=t2_mentions, inline=False)
             await channel.send(embed=embed)
             await self._announce_strong_side(channel, room_id)
-            await channel.send("✅ Капитаны, нажмите **Ready** затем **▶ Start** чтобы начать!")
+            await channel.send("✅ Капитаны, нажмите **▶ Start** чтобы начать!")
 
         await self._refresh_room_embed(room_id)
 
@@ -1434,6 +1433,10 @@ class Rooms(commands.Cog):
     async def become_captain(self, ctx: commands.Context):
         """
         [Только режим cap] Стать капитаном комнаты. Максимум 2 капитана.
+        Если уже 2 капитана, но пик ещё не начался — снять себя и переизбраться нельзя,
+        но можно написать !uncap и затем !cap снова.
+        Когда комната полная, но пик не начат — можно занять место если ты уже капитан
+        другой команды (то есть переизбрать себя через !uncap → !cap не нужно запрещать).
         """
         if not self._is_guild(ctx):
             return
@@ -1448,8 +1451,8 @@ class Rooms(commands.Cog):
             await ctx.send("❌ Команда `!cap` доступна только в режиме **капитанского пика**.")
             return
 
-        if room["status"] == "started":
-            await ctx.send("❌ Игра уже началась.")
+        if room["status"] in ("picking", "started"):
+            await ctx.send("❌ Пик уже начался — менять капитана нельзя.")
             return
 
         players = await db.get_room_players(room["room_id"])
@@ -1462,19 +1465,36 @@ class Rooms(commands.Cog):
             await ctx.send("⚠️ Ты уже капитан. Используй `!uncap` чтобы снять с себя роль.")
             return
 
-        # Считаем текущих капитанов
-        current_caps = [p for p in players if p["is_captain"]]
-        if len(current_caps) >= 2:
-            cap_names = " и ".join(f"**{p['username']}**" for p in current_caps)
-            await ctx.send(f"❌ Уже есть 2 капитана: {cap_names}. Третьим стать нельзя.")
-            return
+        # Считаем текущих капитанов — с защитой от гонки
+        # Используем lock на room_id чтобы два игрока не стали капитанами одновременно
+        lock = self._finalize_locks.setdefault(room["room_id"], asyncio.Lock())
+        async with lock:
+            # Перечитываем внутри лока
+            players = await db.get_room_players(room["room_id"])
+            me = next((p for p in players if p["discord_id"] == ctx.author.id), None)
+            if not me:
+                await ctx.send("❌ Ты не найден в комнате.")
+                return
+            if me["is_captain"]:
+                await ctx.send("⚠️ Ты уже капитан.")
+                return
 
-        # Определяем команду: капитан 1 берёт team=1, капитан 2 берёт team=2
-        taken_teams = {p["team"] for p in current_caps}
-        new_team = 1 if 1 not in taken_teams else 2
+            current_caps = [p for p in players if p["is_captain"]]
+            if len(current_caps) >= 2:
+                cap_names = " и ".join(f"**{p['username']}**" for p in current_caps)
+                await ctx.send(
+                    f"❌ Уже есть 2 капитана: {cap_names}.\n"
+                    f"Если хочешь переизбрать капитана — попроси действующего капитана написать `!uncap`, "
+                    f"затем напиши `!cap`."
+                )
+                return
 
-        await db.set_player_team(room["room_id"], ctx.author.id, new_team)
-        await db.set_captain(room["room_id"], ctx.author.id, True)
+            # Определяем команду: капитан 1 берёт team=1, капитан 2 берёт team=2
+            taken_teams = {p["team"] for p in current_caps}
+            new_team = 1 if 1 not in taken_teams else 2
+
+            await db.set_player_team(room["room_id"], ctx.author.id, new_team)
+            await db.set_captain(room["room_id"], ctx.author.id, True)
 
         guild = ctx.guild
         channel = guild.get_channel(room["channel_id"])
@@ -1604,7 +1624,7 @@ class Rooms(commands.Cog):
             await db.update_room_status(room["room_id"], "full")
             await self._assign_team2_captain(room["room_id"])
             if channel:
-                await channel.send("🎯 Команды сформированы! Капитаны, нажмите **✅ Ready** затем **▶ Start**")
+                await channel.send("🎯 Команды сформированы! Капитаны, нажмите **▶ Start** чтобы начать!")
                 await self._announce_strong_side(channel, room["room_id"])
 
         await self._refresh_room_embed(room["room_id"])
@@ -1790,21 +1810,6 @@ class Rooms(commands.Cog):
         if not me or not me["is_captain"]:
             if hasattr(channel, "send"):
                 await channel.send("Только капитаны могут запустить игру.")
-            return
-
-        await db.set_start_confirm(room_id, user.id)
-
-        players = await db.get_room_players(room_id)
-        cap1 = next((p for p in players if p["team"] == 1 and p["is_captain"]), None)
-        cap2 = next((p for p in players if p["team"] == 2 and p["is_captain"]), None)
-
-        if not (cap1 and cap2 and cap1["confirmed_start"] and cap2["confirmed_start"]):
-            guild = self.bot.get_guild(Config.GUILD_ID)
-            room_channel = guild.get_channel(room["channel_id"]) if guild else None
-            if room_channel:
-                await room_channel.send(
-                    f"✅ {user.mention} подтвердил старт. Ждём второго капитана."
-                )
             return
 
         await db.update_room_status(room_id, "started")
