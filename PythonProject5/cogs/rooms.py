@@ -733,7 +733,11 @@ class Rooms(commands.Cog):
         return ctx.guild and ctx.guild.id == Config.GUILD_ID
 
     async def _get_or_create_category(self, guild: discord.Guild) -> discord.CategoryChannel:
-        cat = discord.utils.get(guild.categories, name=Config.CATEGORY_NAME)
+        # Сначала ищем категорию PLAY🟢, потом fallback на CATEGORY_NAME
+        cat = discord.utils.find(
+            lambda c: "PLAY" in c.name.upper() or c.name == Config.CATEGORY_NAME,
+            guild.categories,
+        )
         if cat is None:
             cat = await guild.create_category(
                 Config.CATEGORY_NAME,
