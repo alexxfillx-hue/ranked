@@ -2,22 +2,21 @@ import discord
 from discord.ext import commands
 from config import Config, RANKS, get_rank
 from utils.i18n import t
-import time
 
 
 class LangButton(discord.ui.Button):
     """Кнопка выбора языка при регистрации."""
 
-    def __init__(self, lang: str, nickname: str, uid: int):
+    def __init__(self, lang: str, nickname: str):
         labels = {"ru": "🇷🇺 Русский", "en": "🇬🇧 English"}
         styles = {"ru": discord.ButtonStyle.primary, "en": discord.ButtonStyle.secondary}
-        # uid + timestamp делает custom_id уникальным для каждого вызова !register
-        # Это предотвращает конфликт кнопок если игрок вызвал команду дважды
-        unique = f"{uid}_{int(time.time())}"
+        # ВАЖНО: custom_id должен быть СТАТИЧЕСКИМ (без timestamp и uid),
+        # иначе после рестарта бота Discord присылает interaction с «мёртвой» кнопкой.
+        # Двойной вызов !register решается через _pending_registration + удалением старого сообщения.
         super().__init__(
             label=labels[lang],
             style=styles[lang],
-            custom_id=f"lang_{lang}_{nickname[:16]}_{unique}",
+            custom_id=f"lang_{lang}",
         )
         self.lang = lang
         self.nickname = nickname
@@ -77,8 +76,8 @@ class LangSelectView(discord.ui.View):
         super().__init__(timeout=120)
         self.uid = uid
         self._pending_set = pending_set
-        self.add_item(LangButton("ru", nickname, uid))
-        self.add_item(LangButton("en", nickname, uid))
+        self.add_item(LangButton("ru", nickname))
+        self.add_item(LangButton("en", nickname))
 
     async def on_timeout(self):
         for item in self.children:
@@ -90,9 +89,9 @@ class LangSelectView(discord.ui.View):
 class Register(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Множество discord_id у которых уже открыт выбор языка.
-        # Не даёт отправить второй embed если игрок нажал !register дважды.
-        self._pending_registration: set[int] = set()
+        # Словарь discord_id → message_id открытого выбора языка.
+        # Позволяет удалить старое сообщение если игрок вызвал !register снова.
+        self._pending_registration: dict[int, int] = {}
 
     def _guild_check(self, ctx):
         return ctx.guild and ctx.guild.id == Config.GUILD_ID
@@ -162,14 +161,15 @@ class Register(commands.Cog):
             )
             return
 
-        # Защита от двойного вызова: если уже ждём выбор языка — не шлём снова
+        # Если у игрока уже открыто сообщение с выбором языка — удаляем старое
         if ctx.author.id in self._pending_registration:
-            await ctx.send(
-                "⏳ Ты уже выбираешь язык! Нажми одну из кнопок выше. / "
-                "You already have a language selection open! Click one of the buttons above.",
-                delete_after=8,
-            )
-            return
+            old_msg_id = self._pending_registration[ctx.author.id]
+            try:
+                old_msg = await ctx.channel.fetch_message(old_msg_id)
+                await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+            del self._pending_registration[ctx.author.id]
 
         taken = await db.get_player_by_username(nickname)
         if taken:
@@ -179,7 +179,6 @@ class Register(commands.Cog):
             )
             return
 
-        self._pending_registration.add(ctx.author.id)
         embed = discord.Embed(
             title="🌐 Выбери язык / Choose your language",
             description=(
@@ -189,8 +188,11 @@ class Register(commands.Cog):
             ),
             color=0x5865F2,
         )
-        view = LangSelectView(nickname, ctx.author.id, self._pending_registration)
-        await ctx.send(embed=embed, view=view)
+        # pending_set передаём как set-обёртку для совместимости с on_timeout
+        pending_set_proxy = _PendingProxy(self._pending_registration, ctx.author.id)
+        view = LangSelectView(nickname, ctx.author.id, pending_set_proxy)
+        msg = await ctx.send(embed=embed, view=view)
+        self._pending_registration[ctx.author.id] = msg.id
 
     @commands.command(name="rename")
     async def rename(self, ctx: commands.Context, *, new_nick: str = None):
@@ -226,6 +228,19 @@ class Register(commands.Cog):
             await ctx.send(t("rename_ok_server", lang, nick=new_nick))
         except discord.Forbidden:
             await ctx.send(t("rename_ok_manual", lang, nick=new_nick))
+
+
+class _PendingProxy:
+    """
+    Прокси-объект: передаётся в LangSelectView как 'pending_set'.
+    При вызове .discard(uid) — удаляет uid из словаря _pending_registration.
+    """
+    def __init__(self, mapping: dict, uid: int):
+        self._mapping = mapping
+        self._uid = uid
+
+    def discard(self, uid: int):
+        self._mapping.pop(uid, None)
 
 
 async def setup(bot):
