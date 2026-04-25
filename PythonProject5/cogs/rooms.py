@@ -155,16 +155,13 @@ class CreateRoomView(discord.ui.View):
     """
 
     def __init__(self):
-        super().__init__(timeout=60)
+        # timeout=None обязателен — это persistent view (регистрируется через bot.add_view при старте)
+        super().__init__(timeout=None)
         for row_idx, size in enumerate([4, 3, 2]):
             for mode in ("team", "random", "cap"):
                 self.add_item(CreateRoomButton(size, mode, row=row_idx))
         # 1v1 — только одна кнопка, режим team (капитаны = сами игроки)
         self.add_item(Create1v1Button(row=3))
-
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
 
 
 class JoinButton(discord.ui.Button):
@@ -1082,7 +1079,7 @@ class Rooms(commands.Cog):
                 "🎲 **Random / Рандом** — 🇷🇺 бот распределяет случайно · 🇬🇧 bot assigns randomly\n"
                 "🎯 **Captain / Капитан** — 🇷🇺 капитаны пикают игроков · 🇬🇧 captains pick players"
             )
-            view = discord.ui.View(timeout=60)
+            view = discord.ui.View(timeout=None)
             for mode_key in ("team", "random", "cap"):
                 view.add_item(CreateRoomButton(resolved_size, mode_key, row=0))
         else:
