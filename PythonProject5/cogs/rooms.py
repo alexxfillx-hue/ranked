@@ -1291,23 +1291,44 @@ class Rooms(commands.Cog):
     # ── Cap mode ─────────────────────────────────────────────────
 
     async def _start_captain_pick(self, room_id: int, players: list, size: int, channel):
-        """Запускает режим капитанского пика: выбирает двух капитанов рандомно."""
+        """Комната заполнена в cap-режиме — предлагаем выбрать способ назначения капитанов."""
         db = self.bot.db
+        await db.update_room_status(room_id, "full")
+        await self._refresh_lobby()
+
+        if channel:
+            mentions = " ".join(f"<@{p['discord_id']}>" for p in players)
+            embed = discord.Embed(
+                title="🎯 Комната заполнена! Выберите способ назначения капитанов",
+                description=(
+                    f"{mentions}\n\n"
+                    "**`!random`** — 🎲 Бот выбирает двух капитанов случайно\n"
+                    "**`!cap`** — 👑 Два игрока назначают себя капитанами сами\n\n"
+                    "После того как оба капитана выбраны, напишите **`!start`** чтобы начать пик.\n"
+                    "Любой игрок может написать `!uncap` чтобы снять с себя роль капитана (до начала пика)."
+                ),
+                color=0xE67E22,
+            )
+            await channel.send(embed=embed)
+
+    async def _do_random_captains(self, room_id: int, channel):
+        """Выбирает двух капитанов рандомно и запускает пик."""
+        db = self.bot.db
+        players = await db.get_room_players(room_id)
+        room = await db.get_room(room_id)
+        if not room or room["status"] not in ("full", "waiting"):
+            return
 
         all_players = list(players)
         random.shuffle(all_players)
-
         cap1 = all_players[0]
         cap2 = all_players[1]
 
-        # Назначаем капитанов в разные команды
         await db.set_player_team(room_id, cap1["discord_id"], 1)
         await db.set_captain(room_id, cap1["discord_id"], True)
         await db.set_player_team(room_id, cap2["discord_id"], 2)
         await db.set_captain(room_id, cap2["discord_id"], True)
 
-        # Остальные пока team=0
-        # Определяем кто пикует первым
         first_pick_team = random.choice([1, 2])
         await db.set_pick_turn(room_id, first_pick_team)
         await db.update_room_status(room_id, "picking")
@@ -1424,16 +1445,56 @@ class Rooms(commands.Cog):
         await self._refresh_room_embed(room_id)
 
 
-    # ── Cap mode: !cap / !uncap ──────────────────────────────────
+    # ── Cap mode: !random / !cap / !uncap ──────────────────────────
+
+    @commands.command(name="random")
+    async def random_captains(self, ctx: commands.Context):
+        """
+        [Только режим cap] Бот случайно выбирает двух капитанов и запускает пик.
+        Доступно только когда комната полная и пик ещё не начат.
+        """
+        if not self._is_guild(ctx):
+            return
+
+        db = self.bot.db
+        room = await db.get_player_room(ctx.author.id)
+        if not room:
+            await ctx.send("❌ Ты не в комнате.")
+            return
+
+        if room["mode"] != "cap":
+            await ctx.send("❌ Команда `!random` доступна только в режиме **капитанского пика**.")
+            return
+
+        if room["status"] == "picking":
+            await ctx.send("❌ Пик уже начался.")
+            return
+
+        if room["status"] in ("started", "awaiting_screenshot"):
+            await ctx.send("❌ Игра уже идёт.")
+            return
+
+        if room["status"] not in ("waiting", "full"):
+            await ctx.send("❌ Комната не в нужном состоянии.")
+            return
+
+        players = await db.get_room_players(room["room_id"])
+        total_slots = room["size"] * 2
+        if len(players) < total_slots:
+            await ctx.send(f"❌ Комната ещё не заполнена ({len(players)}/{total_slots}).")
+            return
+
+        guild = ctx.guild
+        channel = guild.get_channel(room["channel_id"])
+        await ctx.message.delete(delay=2)
+        await self._do_random_captains(room["room_id"], channel)
+        await self._refresh_room_embed(room["room_id"])
 
     @commands.command(name="cap")
     async def become_captain(self, ctx: commands.Context):
         """
-        [Только режим cap] Стать капитаном комнаты. Максимум 2 капитана.
-        Если уже 2 капитана, но пик ещё не начался — снять себя и переизбраться нельзя,
-        но можно написать !uncap и затем !cap снова.
-        Когда комната полная, но пик не начат — можно занять место если ты уже капитан
-        другой команды (то есть переизбрать себя через !uncap → !cap не нужно запрещать).
+        [Только режим cap] Стать капитаном. Максимум 2 капитана.
+        Доступно пока пик не начался (статус waiting или full).
         """
         if not self._is_guild(ctx):
             return
@@ -1462,11 +1523,9 @@ class Rooms(commands.Cog):
             await ctx.send("⚠️ Ты уже капитан. Используй `!uncap` чтобы снять с себя роль.")
             return
 
-        # Считаем текущих капитанов — с защитой от гонки
-        # Используем lock на room_id чтобы два игрока не стали капитанами одновременно
+        # Защита от гонки: два игрока одновременно жмут !cap
         lock = self._finalize_locks.setdefault(room["room_id"], asyncio.Lock())
         async with lock:
-            # Перечитываем внутри лока
             players = await db.get_room_players(room["room_id"])
             me = next((p for p in players if p["discord_id"] == ctx.author.id), None)
             if not me:
@@ -1481,12 +1540,10 @@ class Rooms(commands.Cog):
                 cap_names = " и ".join(f"**{p['username']}**" for p in current_caps)
                 await ctx.send(
                     f"❌ Уже есть 2 капитана: {cap_names}.\n"
-                    f"Если хочешь переизбрать капитана — попроси действующего капитана написать `!uncap`, "
-                    f"затем напиши `!cap`."
+                    "Попроси действующего капитана написать `!uncap`, затем пиши `!cap`."
                 )
                 return
 
-            # Определяем команду: капитан 1 берёт team=1, капитан 2 берёт team=2
             taken_teams = {p["team"] for p in current_caps}
             new_team = 1 if 1 not in taken_teams else 2
 
@@ -1495,11 +1552,21 @@ class Rooms(commands.Cog):
 
         guild = ctx.guild
         channel = guild.get_channel(room["channel_id"])
+
+        # Проверяем: если оба капитана назначены — напоминаем начать пик
+        players = await db.get_room_players(room["room_id"])
+        caps = [p for p in players if p["is_captain"]]
+        total_slots = room["size"] * 2
+
         if channel:
             await channel.send(
-                f"👑 {ctx.author.mention} стал капитаном **Команды {new_team}**! "
-                f"/ became captain of **Team {new_team}**!"
+                f"👑 {ctx.author.mention} стал капитаном **Команды {new_team}**!"
             )
+            if len(caps) == 2 and len(players) == total_slots:
+                await channel.send(
+                    "✅ Оба капитана выбраны и комната полная!\n"
+                    "Напишите **`!start`** чтобы начать пик игроков."
+                )
 
         await self._refresh_room_embed(room["room_id"])
         await ctx.message.delete(delay=2)
@@ -1507,7 +1574,8 @@ class Rooms(commands.Cog):
     @commands.command(name="uncap")
     async def remove_captain(self, ctx: commands.Context):
         """
-        [Только режим cap] Снять с себя роль капитана.
+        [Только режим cap] Снять с себя роль капитана. Можно до начала пика,
+        даже если комната уже полная.
         """
         if not self._is_guild(ctx):
             return
@@ -1522,6 +1590,7 @@ class Rooms(commands.Cog):
             await ctx.send("❌ Команда `!uncap` доступна только в режиме **капитанского пика**.")
             return
 
+        # Разрешаем uncap при waiting и full, но не при picking/started
         if room["status"] in ("picking", "started"):
             await ctx.send("❌ Пик уже начался — снять капитана нельзя.")
             return
@@ -1536,7 +1605,6 @@ class Rooms(commands.Cog):
             await ctx.send("⚠️ Ты не являешься капитаном.")
             return
 
-        # Снимаем капитанство и возвращаем в team=0
         await db.set_captain(room["room_id"], ctx.author.id, False)
         await db.set_player_team(room["room_id"], ctx.author.id, 0)
 
@@ -1544,8 +1612,8 @@ class Rooms(commands.Cog):
         channel = guild.get_channel(room["channel_id"])
         if channel:
             await channel.send(
-                f"🔓 {ctx.author.mention} снял с себя роль капитана / stepped down as captain.\n"
-                "Используй `!cap` чтобы стать капитаном / Use `!cap` to become captain."
+                f"🔓 {ctx.author.mention} снял с себя роль капитана.\n"
+                "Используй `!cap` чтобы стать капитаном снова, или `!random` чтобы бот выбрал."
             )
 
         await self._refresh_room_embed(room["room_id"])
