@@ -167,6 +167,8 @@ def profile_embed(player, member: discord.Member) -> discord.Embed:
     embed.add_field(name="📈 Винрейт", value=f"{wr}%", inline=True)
     if streak >= 2:
         embed.add_field(name="🔥 Вин-стрик", value=str(streak), inline=True)
+    reports = player["report_count"] if "report_count" in player.keys() else 0
+    embed.add_field(name="🚩 Репортов", value=str(reports), inline=True)
     if player["penalty_games"]:
         embed.add_field(
             name="⚠️ Штраф", value=f"Ещё {player['penalty_games']} игр", inline=True
