@@ -662,8 +662,9 @@ class ReportRoomButton(discord.ui.Button):
             return
 
         guild = interaction.guild
-        admin_channel = discord.utils.get(
-            guild.text_channels, name=Config.ADMIN_CHANNEL_NAME
+        admin_channel = discord.utils.find(
+            lambda c: Config.ADMIN_CHANNEL_NAME in c.name or c.name == Config.ADMIN_CHANNEL_NAME,
+            guild.text_channels,
         )
         if admin_channel:
             mod_role = discord.utils.get(guild.roles, name=Config.MODERATOR_ROLE_NAME)
@@ -829,8 +830,11 @@ class Rooms(commands.Cog):
     # ── Lobby channel ─────────────────────────────────────────────
 
     async def _get_or_create_lobby_channel(self, guild: discord.Guild) -> discord.TextChannel:
-        """Возвращает канал лобби (только чтение для всех), создаёт если нет."""
-        channel = discord.utils.get(guild.text_channels, name=Config.LOBBY_CHANNEL_NAME)
+        """Возвращает канал лобби — ищет по PLAY_CHANNEL_NAME, создаёт если нет."""
+        channel = discord.utils.find(
+            lambda c: c.name == Config.PLAY_CHANNEL_NAME or Config.LOBBY_CHANNEL_NAME in c.name,
+            guild.text_channels,
+        )
         if channel is None:
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(
@@ -2215,8 +2219,9 @@ class Rooms(commands.Cog):
         except discord.Forbidden:
             # Если DM закрыты — отправить в системный канал или лобби
             guild = member.guild
-            ch = guild.system_channel or discord.utils.get(
-                guild.text_channels, name=Config.LOBBY_CHANNEL_NAME
+            ch = guild.system_channel or discord.utils.find(
+                lambda c: Config.PLAY_CHANNEL_NAME in c.name or Config.LOBBY_CHANNEL_NAME in c.name,
+                guild.text_channels,
             )
             if ch:
                 try:

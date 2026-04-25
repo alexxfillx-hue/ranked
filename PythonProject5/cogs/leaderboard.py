@@ -63,8 +63,9 @@ class Leaderboard(commands.Cog):
         await db.add_report(ctx.author.id, member.id, reason)
 
         # отправляем в канал администрации
-        admin_channel = discord.utils.get(
-            ctx.guild.text_channels, name=Config.ADMIN_CHANNEL_NAME
+        admin_channel = discord.utils.find(
+            lambda c: Config.ADMIN_CHANNEL_NAME in c.name or c.name == Config.ADMIN_CHANNEL_NAME,
+            ctx.guild.text_channels,
         )
         if admin_channel:
             embed = discord.Embed(
@@ -89,7 +90,87 @@ class Leaderboard(commands.Cog):
         except discord.Forbidden:
             pass
 
-    @commands.command(name="rules")
+    @commands.command(name="ranks")
+    async def ranks(self, ctx: commands.Context):
+        if not self._is_guild(ctx):
+            return
+
+        from config import RANKS
+        embed = discord.Embed(
+            title="🏆  Система рангов",
+            description="Список всех рангов и необходимое ELO:",
+            color=0xFFD700,
+        )
+        rank_emojis = ["🥉", "🥉", "🥉", "🥈", "🥈", "🥇", "🥇", "💎", "💠", "👑"]
+        for i, (min_e, max_e, name, color, _) in enumerate(RANKS):
+            emoji = rank_emojis[i] if i < len(rank_emojis) else "🔹"
+            max_str = str(max_e) if max_e < 99999 else "∞"
+            embed.add_field(
+                name=f"{emoji} {name}",
+                value=f"`{min_e}` — `{max_str}` ELO",
+                inline=True,
+            )
+        embed.set_footer(text="ELO начисляется за победы в матчах")
+        await ctx.send(embed=embed)
+
+    @commands.command(name="plus")
+    async def mod_plus(self, ctx: commands.Context, member: discord.Member, amount: int):
+        if not self._is_guild(ctx):
+            return
+        if not (ctx.author.guild_permissions.administrator or
+                discord.utils.get(ctx.author.roles, name=self.bot.db.__class__.__module__) or
+                any(r.name == "Модератор" for r in ctx.author.roles) or
+                ctx.author.guild_permissions.administrator):
+            from config import Config as _C
+            if not any(r.name == _C.MODERATOR_ROLE_NAME for r in ctx.author.roles) and \
+               not ctx.author.guild_permissions.administrator:
+                await ctx.send("❌ Нет прав. Только модераторы могут изменять ELO.")
+                return
+        from config import Config as _C
+        if not any(r.name == _C.MODERATOR_ROLE_NAME for r in ctx.author.roles) and \
+           not ctx.author.guild_permissions.administrator:
+            await ctx.send("❌ Нет прав.")
+            return
+        if amount <= 0:
+            await ctx.send("❌ Укажи положительное число.")
+            return
+        new_elo = await self.bot.db.mod_adjust_elo(member.id, amount)
+        if new_elo == -1:
+            await ctx.send("❌ Игрок не зарегистрирован.")
+            return
+        from cogs.register import Register
+        reg_cog: Register = self.bot.cogs.get("Register")
+        if reg_cog and ctx.guild:
+            m = ctx.guild.get_member(member.id)
+            if m:
+                await reg_cog._sync_rank_role(m, new_elo)
+        await ctx.send(f"✅ **{member.display_name}** +{amount} ELO → **{new_elo}** ELO")
+
+    @commands.command(name="minus")
+    async def mod_minus(self, ctx: commands.Context, member: discord.Member, amount: int):
+        if not self._is_guild(ctx):
+            return
+        from config import Config as _C
+        if not any(r.name == _C.MODERATOR_ROLE_NAME for r in ctx.author.roles) and \
+           not ctx.author.guild_permissions.administrator:
+            await ctx.send("❌ Нет прав. Только модераторы могут изменять ELO.")
+            return
+        if amount <= 0:
+            await ctx.send("❌ Укажи положительное число.")
+            return
+        new_elo = await self.bot.db.mod_adjust_elo(member.id, -amount)
+        if new_elo == -1:
+            await ctx.send("❌ Игрок не зарегистрирован.")
+            return
+        from cogs.register import Register
+        reg_cog: Register = self.bot.cogs.get("Register")
+        if reg_cog and ctx.guild:
+            m = ctx.guild.get_member(member.id)
+            if m:
+                await reg_cog._sync_rank_role(m, new_elo)
+        await ctx.send(f"✅ **{member.display_name}** -{amount} ELO → **{new_elo}** ELO")
+
+
     async def rules(self, ctx: commands.Context):
         if not self._is_guild(ctx):
             return
