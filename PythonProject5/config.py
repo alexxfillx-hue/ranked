@@ -20,18 +20,19 @@ class Config:
     GAME_DISBAND_MINUTES: int = 90  # через сколько минут расформировать
 
 
-# (min_elo, max_elo, name, color, role_name)
+# (min_elo, max_elo, display_name, color, role_name)
+# role_name должен ТОЧНО совпадать с названием роли в Discord
 RANKS: list[tuple] = [
-    (0, 99, "Бронза 1", 0xCD7F32, "Бронза 1"),
-    (100, 199, "Бронза 2", 0xCD7F32, "Бронза 2"),
-    (200, 299, "Бронза 3", 0xCD7F32, "Бронза 3"),
-    (300, 399, "Серебро I", 0xC0C0C0, "Серебро I"),
-    (400, 499, "Серебро II", 0xC0C0C0, "Серебро II"),
-    (500, 599, "Золото I", 0xFFD700, "Золото I"),
-    (600, 699, "Золото II", 0xFFD700, "Золото II"),
-    (700, 799, "Платина", 0x00CED1, "Платина"),
-    (800, 899, "Алмаз", 0x00BFFF, "Алмаз"),
-    (900, 99999, "Мастер", 0xFF6347, "Мастер"),
+    (0,   99,    "Bronze Ⅰ",   0xCD7F32, "Bronze Ⅰ"),
+    (100, 199,   "Bronze ⅠⅠ",  0xCD7F32, "Bronze ⅠⅠ"),
+    (200, 299,   "Bronze ⅠⅠⅠ", 0xCD7F32, "Bronze ⅠⅠⅠ"),
+    (300, 399,   "Silver Ⅰ",   0xC0C0C0, "Silver Ⅰ"),
+    (400, 499,   "Silver ⅠⅠ",  0xC0C0C0, "Silver ⅠⅠ"),
+    (500, 599,   "Gold Ⅰ",     0xFFD700, "Gold Ⅰ"),
+    (600, 699,   "Gold ⅠⅠ",    0xFFD700, "Gold ⅠⅠ"),
+    (700, 799,   "Platinum",    0x00CED1, "Platinum"),
+    (800, 899,   "Diamond",     0x00BFFF, "Diamond"),
+    (900, 99999, "Master",      0xFF6347, "Master"),
 ]
 
 
