@@ -21,8 +21,8 @@ def room_embed(room_id: int, size: int, players, mode: str = "team") -> discord.
     cap1 = next((p for p in team1 if p["is_captain"]), None)
     cap2 = next((p for p in team2 if p["is_captain"]), None)
 
-    ready1 = bool(cap1 and cap1["confirmed_start"])
-    ready2 = bool(cap2 and cap2["confirmed_start"])
+    ready1 = False  # Ready step removed - start is direct
+    ready2 = False
 
     def player_line(p, show_unpicked=False):
         rank, _ = get_rank(p["elo"])
@@ -47,7 +47,7 @@ def room_embed(room_id: int, size: int, players, mode: str = "team") -> discord.
             def build_random_team(team, cap_ready, sz):
                 lines = [player_line(p) for p in team]
                 lines += ["• *Свободное место*"] * (sz - len(team))
-                status = "🟢 **READY**" if cap_ready else "🔴 Not ready"
+                status = "✅ Сформирована"
                 return "\n".join(lines), status
 
             t1_text, t1_status = build_random_team(team1, ready1, size)
@@ -88,7 +88,7 @@ def room_embed(room_id: int, size: int, players, mode: str = "team") -> discord.
             def build_cap_team(team, cap_ready, sz):
                 lines = [player_line(p) for p in team]
                 lines += ["• *Ожидание пика...*"] * (sz - len(team))
-                status = "🟢 **READY**" if cap_ready else "🔴 Not ready"
+                status = "✅ Сформирована"
                 return "\n".join(lines), status
 
             t1_text, t1_status = build_cap_team(team1, ready1, size)
@@ -127,7 +127,7 @@ def room_embed(room_id: int, size: int, players, mode: str = "team") -> discord.
         lines = [player_line(p) for p in team]
         free = sz - len(team)
         lines += ["• *Свободное место*"] * free
-        status = "🟢 **READY**" if cap_ready else "🔴 Not ready"
+        status = "✅ Сформирована" if (len(team) == sz) else "⏳ Набор"
         return "\n".join(lines), status
 
     t1_text, t1_status = build_team(team1, ready1, size)
