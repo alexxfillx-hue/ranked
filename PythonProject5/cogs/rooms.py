@@ -2218,23 +2218,12 @@ class Rooms(commands.Cog):
 
         embed.set_footer(text="Удачи! / Good luck! 🎮")
 
+        # Отправляем ТОЛЬКО в DM. Если DM закрыты — ничего не делаем.
+        # Двойное приветствие возникало из-за отправки и в DM и в канал одновременно.
         try:
             await member.send(embed=embed)
         except discord.Forbidden:
-            # Если DM закрыты — отправить в системный канал или лобби
-            guild = member.guild
-            ch = guild.system_channel or discord.utils.find(
-                lambda c: Config.PLAY_CHANNEL_NAME in c.name or Config.LOBBY_CHANNEL_NAME in c.name,
-                guild.text_channels,
-            )
-            if ch:
-                try:
-                    await ch.send(
-                        f"👋 {member.mention}, добро пожаловать! / Welcome!",
-                        embed=embed,
-                    )
-                except discord.Forbidden:
-                    pass
+            pass
 
     @tasks.loop(minutes=1)
     async def game_timeout_loop(self):
