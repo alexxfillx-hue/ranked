@@ -1322,12 +1322,16 @@ class Rooms(commands.Cog):
 
         if channel:
             first_cap = cap1 if first_pick_team == 1 else cap2
+            second_pick_team = 2 if first_pick_team == 1 else 1
+            second_cap = cap2 if first_pick_team == 1 else cap1
+            strong_side = "🔵 Команда 1" if second_pick_team == 1 else "🔴 Команда 2"
             embed = discord.Embed(
                 title="🎯 Капитанский пик начался!",
                 description=(
                     f"👑 Капитан команды 1: <@{cap1['discord_id']}>\n"
                     f"👑 Капитан команды 2: <@{cap2['discord_id']}>\n\n"
-                    f"**Первым пикует: <@{first_cap['discord_id']}>** (Команда {first_pick_team})"
+                    f"**Первым пикует: <@{first_cap['discord_id']}>** (Команда {first_pick_team})\n\n"
+                    f"⚔️ **Сильная сторона: {strong_side}** (пикует вторым — <@{second_cap['discord_id']}>)"
                 ),
                 color=0xE67E22,
             )
@@ -1425,7 +1429,6 @@ class Rooms(commands.Cog):
             embed.add_field(name="🔵 Команда 1", value=t1_mentions, inline=False)
             embed.add_field(name="🔴 Команда 2", value=t2_mentions, inline=False)
             await channel.send(embed=embed)
-            await self._announce_strong_side(channel, room_id)
             await channel.send("✅ Капитаны, нажмите **▶ Start** чтобы начать!")
 
         await self._refresh_room_embed(room_id)
@@ -1477,32 +1480,51 @@ class Rooms(commands.Cog):
         await self._refresh_room_embed(room["room_id"])
 
     @commands.command(name="cap")
-    async def become_captain(self, ctx: commands.Context):
+    async def become_captain(self, ctx: commands.Context, member: discord.Member = None):
         """
-        [Только режим cap] Стать капитаном. Максимум 2 капитана.
-        Доступно пока пик не начался (статус waiting или full).
+        [Режим cap] Стать капитаном (без аргумента) или назначить капитана (мод + @игрок).
+        Максимум 2 капитана. Доступно пока пик не начался.
         """
         if not self._is_guild(ctx):
             return
 
         db = self.bot.db
-        room = await db.get_player_room(ctx.author.id)
-        if not room:
-            await ctx.send("❌ Ты не в комнате.")
-            return
+        is_mod = self._is_mod(ctx.author)
+
+        # Если передан аргумент @игрок — это модераторская форма
+        if member is not None:
+            if not is_mod:
+                await ctx.send("❌ Только модераторы могут назначать капитана другому игроку.")
+                return
+            # Ищем комнату цели
+            room = await db.get_player_room(member.id)
+            if not room:
+                await ctx.send("❌ Этот игрок не в комнате.")
+                return
+            target_id = member.id
+            target_mention = member.mention
+        else:
+            # Обычный игрок назначает себя
+            room = await db.get_player_room(ctx.author.id)
+            if not room:
+                await ctx.send("❌ Ты не в комнате.")
+                return
+            target_id = ctx.author.id
+            target_mention = ctx.author.mention
+            member = ctx.author
 
         if room["mode"] != "cap":
             await ctx.send("❌ Команда `!cap` доступна только в режиме **капитанского пика**.")
             return
 
+        # Модератор может назначать капитана в любой статус кроме started
+        # Обычный игрок — только до picking
         if room["status"] == "started":
             await ctx.send("❌ Игра уже идёт — менять капитана нельзя.")
             return
 
-        # При статусе picking (!random уже запустил пик) — сбрасываем обратно в full
-        # чтобы можно было выбрать капитанов через !cap заново
+        # При статусе picking — сбрасываем обратно в full чтобы переназначить
         if room["status"] == "picking":
-            # Сбрасываем всех капитанов и их команды
             players_tmp = await db.get_room_players(room["room_id"])
             for p in players_tmp:
                 if p["is_captain"]:
@@ -1510,55 +1532,45 @@ class Rooms(commands.Cog):
                 await db.set_player_team(room["room_id"], p["discord_id"], 0)
             await db.update_room_status(room["room_id"], "full")
 
-        players = await db.get_room_players(room["room_id"])
-        me = next((p for p in players if p["discord_id"] == ctx.author.id), None)
-        if not me:
-            await ctx.send("❌ Ты не найден в комнате.")
-            return
-
-        if me["is_captain"]:
-            await ctx.send("⚠️ Ты уже капитан. Используй `!uncap` чтобы снять с себя роль.")
-            return
-
-        # Защита от гонки: два игрока одновременно жмут !cap
+        # ── Атомарная секция: защита от гонки (два !cap одновременно) ──
         lock = self._finalize_locks.setdefault(room["room_id"], asyncio.Lock())
         async with lock:
             players = await db.get_room_players(room["room_id"])
-            me = next((p for p in players if p["discord_id"] == ctx.author.id), None)
-            if not me:
-                await ctx.send("❌ Ты не найден в комнате.")
-                return
-            if me["is_captain"]:
-                await ctx.send("⚠️ Ты уже капитан.")
+            target = next((p for p in players if p["discord_id"] == target_id), None)
+            if not target:
+                await ctx.send("❌ Игрок не найден в комнате.")
                 return
 
+            if target["is_captain"]:
+                await ctx.send(f"⚠️ {member.display_name} уже капитан. Сначала `!uncap @{member.display_name}`.")
+                return
+
+            # Строгая проверка: не больше 2 капитанов суммарно
             current_caps = [p for p in players if p["is_captain"]]
             if len(current_caps) >= 2:
                 cap_names = " и ".join(f"**{p['username']}**" for p in current_caps)
                 await ctx.send(
-                    f"❌ Уже есть 2 капитана: {cap_names}.\n"
-                    "Попроси действующего капитана написать `!uncap`, затем пиши `!cap`."
+                    f"❌ Уже 2 капитана: {cap_names}.\n"
+                    f"Сначала убери одного через `!uncap @капитан`."
                 )
                 return
 
             taken_teams = {p["team"] for p in current_caps}
             new_team = 1 if 1 not in taken_teams else 2
 
-            await db.set_player_team(room["room_id"], ctx.author.id, new_team)
-            await db.set_captain(room["room_id"], ctx.author.id, True)
+            await db.set_player_team(room["room_id"], target_id, new_team)
+            await db.set_captain(room["room_id"], target_id, True)
 
+        # ── Вне lock: уведомления ──
         guild = ctx.guild
         channel = guild.get_channel(room["channel_id"])
-
-        # Проверяем: если оба капитана назначены — напоминаем начать пик
         players = await db.get_room_players(room["room_id"])
         caps = [p for p in players if p["is_captain"]]
         total_slots = room["size"] * 2
 
         if channel:
-            await channel.send(
-                f"👑 {ctx.author.mention} стал капитаном **Команды {new_team}**!"
-            )
+            prefix = "🔨 [Мод] " if is_mod and target_id != ctx.author.id else ""
+            await channel.send(f"{prefix}👑 {target_mention} стал капитаном **Команды {new_team}**!")
             if len(caps) == 2 and len(players) == total_slots:
                 await channel.send(
                     "✅ Оба капитана выбраны и комната полная!\n"
@@ -1566,55 +1578,82 @@ class Rooms(commands.Cog):
                 )
 
         await self._refresh_room_embed(room["room_id"])
-        await ctx.message.delete(delay=2)
+        try:
+            await ctx.message.delete(delay=2)
+        except (discord.Forbidden, discord.NotFound):
+            pass
 
     @commands.command(name="uncap")
-    async def remove_captain(self, ctx: commands.Context):
+    async def remove_captain(self, ctx: commands.Context, member: discord.Member = None):
         """
-        [Только режим cap] Снять с себя роль капитана. Можно до начала пика,
-        даже если комната уже полная.
+        [Режим cap] Снять роль капитана с себя (без аргумента) или с другого игрока (мод + @игрок).
+        До начала пика (waiting / full). Модератор может в любой статус.
         """
         if not self._is_guild(ctx):
             return
 
         db = self.bot.db
-        room = await db.get_player_room(ctx.author.id)
-        if not room:
-            await ctx.send("❌ Ты не в комнате.")
-            return
+        is_mod = self._is_mod(ctx.author)
+
+        if member is not None:
+            if not is_mod:
+                await ctx.send("❌ Только модераторы могут снимать капитана с другого игрока.")
+                return
+            room = await db.get_player_room(member.id)
+            if not room:
+                await ctx.send("❌ Этот игрок не в комнате.")
+                return
+            target_id = member.id
+            target_mention = member.mention
+        else:
+            room = await db.get_player_room(ctx.author.id)
+            if not room:
+                await ctx.send("❌ Ты не в комнате.")
+                return
+            target_id = ctx.author.id
+            target_mention = ctx.author.mention
+            member = ctx.author
 
         if room["mode"] != "cap":
             await ctx.send("❌ Команда `!uncap` доступна только в режиме **капитанского пика**.")
             return
 
-        # Разрешаем uncap при waiting и full, но не при picking/started
-        if room["status"] in ("picking", "started"):
+        # Обычный игрок не может uncap себя во время пика/игры
+        if not is_mod and room["status"] in ("picking", "started"):
             await ctx.send("❌ Пик уже начался — снять капитана нельзя.")
             return
 
         players = await db.get_room_players(room["room_id"])
-        me = next((p for p in players if p["discord_id"] == ctx.author.id), None)
-        if not me:
-            await ctx.send("❌ Ты не найден в комнате.")
+        target = next((p for p in players if p["discord_id"] == target_id), None)
+        if not target:
+            await ctx.send("❌ Игрок не найден в комнате.")
             return
 
-        if not me["is_captain"]:
-            await ctx.send("⚠️ Ты не являешься капитаном.")
+        if not target["is_captain"]:
+            await ctx.send(f"⚠️ {member.display_name} не является капитаном.")
             return
 
-        await db.set_captain(room["room_id"], ctx.author.id, False)
-        await db.set_player_team(room["room_id"], ctx.author.id, 0)
+        await db.set_captain(room["room_id"], target_id, False)
+        await db.set_player_team(room["room_id"], target_id, 0)
+
+        # Если пик шёл — сбрасываем статус в full
+        if room["status"] == "picking":
+            await db.update_room_status(room["room_id"], "full")
 
         guild = ctx.guild
         channel = guild.get_channel(room["channel_id"])
         if channel:
+            prefix = "🔨 [Мод] " if is_mod and target_id != ctx.author.id else ""
             await channel.send(
-                f"🔓 {ctx.author.mention} снял с себя роль капитана.\n"
-                "Используй `!cap` чтобы стать капитаном снова, или `!random` чтобы бот выбрал."
+                f"{prefix}🔓 {target_mention} снят с роли капитана.\n"
+                "Используй `!cap` чтобы назначить нового, или `!random` чтобы бот выбрал."
             )
 
         await self._refresh_room_embed(room["room_id"])
-        await ctx.message.delete(delay=2)
+        try:
+            await ctx.message.delete(delay=2)
+        except (discord.Forbidden, discord.NotFound):
+            pass
 
     # ── Team mode: !pick ─────────────────────────────────────────
 
@@ -1765,48 +1804,101 @@ class Rooms(commands.Cog):
     # ── kick ─────────────────────────────────────────────────────
 
     @commands.command(name="kick")
-    async def kick(self, ctx: commands.Context, member: discord.Member):
+    async def kick(self, ctx: commands.Context, member: discord.Member = None):
+        """
+        Капитан: кикнуть игрока своей команды (до старта).
+        Модератор: кикнуть любого игрока в любое время, включая во время игры.
+        Команду можно писать прямо в канале комнаты.
+        """
         if not self._is_guild(ctx):
             return
 
-        db = self.bot.db
-        room = await db.get_player_room(ctx.author.id)
-        if not room:
-            await ctx.send("Ты не в комнате.")
+        if member is None:
+            await ctx.send("Укажи игрока: `!kick @игрок`")
             return
 
-        if room["status"] == "started":
-            await ctx.send("Игра уже началась, кикать нельзя.")
-            return
+        db = self.bot.db
+        is_mod = self._is_mod(ctx.author)
+
+        # Модератор может писать команду откуда угодно — ищем комнату по цели.
+        # Обычный капитан ищет свою комнату по себе.
+        if is_mod:
+            room = await db.get_player_room(member.id)
+            if not room:
+                await ctx.send("❌ Этот игрок не в комнате.")
+                return
+        else:
+            room = await db.get_player_room(ctx.author.id)
+            if not room:
+                await ctx.send("❌ Ты не в комнате.")
+                return
+
+            if room["status"] == "started":
+                await ctx.send("❌ Игра уже началась. Модератор может кикнуть командой `!kick @игрок` из канала комнаты.")
+                return
 
         players = await db.get_room_players(room["room_id"])
-        me = next((p for p in players if p["discord_id"] == ctx.author.id), None)
         target = next((p for p in players if p["discord_id"] == member.id), None)
 
-        if not me or not me["is_captain"]:
-            await ctx.send("Только капитан может кикать.")
-            return
-
         if not target:
-            await ctx.send("Этот игрок не в твоей комнате.")
+            await ctx.send("❌ Игрок не найден в комнате.")
             return
 
-        if target["team"] != me["team"] and target["team"] != 0:
-            await ctx.send("Ты можешь кикать только игроков своей команды.")
-            return
+        if not is_mod:
+            me = next((p for p in players if p["discord_id"] == ctx.author.id), None)
+            if not me or not me["is_captain"]:
+                await ctx.send("❌ Только капитан может кикать.")
+                return
+            if target["team"] != me["team"] and target["team"] != 0:
+                await ctx.send("❌ Ты можешь кикать только игроков своей команды.")
+                return
+            if target["is_captain"]:
+                await ctx.send("❌ Нельзя кикнуть другого капитана.")
+                return
 
-        if target["is_captain"]:
-            await ctx.send("Нельзя кикнуть другого капитана.")
-            return
+        was_cap = bool(target["is_captain"])
+        target_team = target["team"]
+        game_was_started = room["status"] == "started"
 
         await db.remove_from_room(room["room_id"], member.id)
+
         guild = ctx.guild
         channel = guild.get_channel(room["channel_id"])
         if channel:
             await self._deny_channel(channel, member)
-            await channel.send(f"🦵 {member.mention} был кикнут из комнаты.")
+            prefix = "🔨 [Мод]" if is_mod else "🦵"
+            await channel.send(f"{prefix} {member.mention} кикнут из комнаты.")
 
-        if room["status"] in ("full", "picking"):
+        players = await db.get_room_players(room["room_id"])
+
+        if not players:
+            if channel:
+                await channel.delete(reason="Комната пуста после кика")
+            await db.delete_room(room["room_id"])
+            await ctx.send(f"✅ {member.display_name} кикнут. Комната удалена (все ушли).")
+            await self._refresh_lobby()
+            return
+
+        # Если кикнули капитана — снимаем флаг (авто-переназначение не делаем,
+        # чтобы мод мог вручную поставить нового через !cap)
+        if was_cap:
+            # Флаг уже сброшен через remove_from_room; если нет — сбрасываем явно
+            pass
+
+        # Сброс статуса
+        if game_was_started:
+            # Останавливаем игру, комната уходит в waiting
+            await db.update_room_status(room["room_id"], "waiting")
+            await db.set_ready(room["room_id"], 1, False)
+            await db.set_ready(room["room_id"], 2, False)
+            for p in players:
+                await db.set_end_vote(room["room_id"], p["discord_id"], None)
+            if channel:
+                await channel.send(
+                    "⏸️ Игра приостановлена из-за кика игрока. "
+                    "Ожидается замена или используйте `!mod_end` чтобы расформировать."
+                )
+        elif room["status"] in ("full", "picking"):
             await db.update_room_status(room["room_id"], "waiting")
             await db.set_ready(room["room_id"], 1, False)
             await db.set_ready(room["room_id"], 2, False)
@@ -1854,14 +1946,7 @@ class Rooms(commands.Cog):
             return
 
         players = await db.get_room_players(room_id)
-        team1 = [p for p in players if p["team"] == 1]
-        team2 = [p for p in players if p["team"] == 2]
         size = room["size"]
-
-        if len(team1) < size or len(team2) < size:
-            if hasattr(channel, "send"):
-                await channel.send("Обе команды должны быть полностью заполнены.")
-            return
 
         me = next((p for p in players if p["discord_id"] == user.id), None)
         if not me:
@@ -1869,7 +1954,63 @@ class Rooms(commands.Cog):
                 await channel.send("Ты не в этой комнате.")
             return
 
-        # В team-режиме старт может нажать любой игрок; в cap/random — только капитан
+        # ── cap-режим: !start запускает пик, а не игру ─────────────
+        if room["mode"] == "cap":
+            # Только капитан может запустить пик
+            if not me["is_captain"]:
+                if hasattr(channel, "send"):
+                    await channel.send("Только капитаны могут запустить пик.")
+                return
+            caps = [p for p in players if p["is_captain"]]
+            if len(caps) < 2:
+                if hasattr(channel, "send"):
+                    await channel.send("❌ Нужно два капитана. Используйте `!cap` или `!random`.")
+                return
+            total_slots = size * 2
+            if len(players) < total_slots:
+                if hasattr(channel, "send"):
+                    await channel.send(f"❌ Комната ещё не заполнена ({len(players)}/{total_slots}).")
+                return
+            # Запускаем пик: выбираем кто пикует первым рандомно
+            first_pick_team = random.choice([1, 2])
+            second_pick_team = 2 if first_pick_team == 1 else 1
+            await db.set_pick_turn(room_id, first_pick_team)
+            await db.update_room_status(room_id, "picking")
+            await self._refresh_lobby()
+            cap1 = next((p for p in caps if p["team"] == 1), None)
+            cap2 = next((p for p in caps if p["team"] == 2), None)
+            first_cap = cap1 if first_pick_team == 1 else cap2
+            second_cap = cap2 if first_pick_team == 1 else cap1
+            guild = self.bot.get_guild(Config.GUILD_ID)
+            room_channel = guild.get_channel(room["channel_id"]) if guild else channel
+            if room_channel:
+                # Сильная сторона достаётся тому, кто пикует ВТОРЫМ
+                strong_side = "🔵 Команда 1" if second_pick_team == 1 else "🔴 Команда 2"
+                strong_embed = discord.Embed(
+                    title="🎯 Капитанский пик начался!",
+                    description=(
+                        f"👑 Капитан команды 1: <@{cap1['discord_id']}>\n"
+                        f"👑 Капитан команды 2: <@{cap2['discord_id']}>\n\n"
+                        f"**Первым пикует: <@{first_cap['discord_id']}>** (Команда {first_pick_team})\n\n"
+                        f"⚔️ **Сильная сторона: {strong_side}** (пикует вторым — <@{second_cap['discord_id']}>)"
+                    ),
+                    color=0xE67E22,
+                )
+                await room_channel.send(embed=strong_embed)
+                await self._send_pick_message(room_id, room_channel, first_pick_team)
+            await self._refresh_room_embed(room_id)
+            return
+
+        # ── team / random режим: проверяем команды и запускаем игру ─
+        team1 = [p for p in players if p["team"] == 1]
+        team2 = [p for p in players if p["team"] == 2]
+
+        if len(team1) < size or len(team2) < size:
+            if hasattr(channel, "send"):
+                await channel.send("Обе команды должны быть полностью заполнены.")
+            return
+
+        # В team-режиме старт может нажать любой игрок; в random — только капитан
         if room["mode"] != "team" and not me["is_captain"]:
             if hasattr(channel, "send"):
                 await channel.send("Только капитаны могут запустить игру.")
@@ -2249,102 +2390,76 @@ class Rooms(commands.Cog):
         if member.guild.id != Config.GUILD_ID:
             return
 
-        embed = discord.Embed(
+        # Embed 1: приветствие + команды
+        embed1 = discord.Embed(
             title="👋 Добро пожаловать на сервер! / Welcome to the server!",
             color=0x5865F2,
         )
-
-        embed.add_field(
-            name="🇷🇺 Русский — Команды бота",
+        embed1.add_field(
+            name="🇷🇺 Команды бота",
             value=(
-                "**Регистрация:**\n"
-                "`!register <ник>` — зарегистрироваться (обязательно!)\n"
-                "`!rename <новый_ник>` — сменить игровой ник\n\n"
-                "**Комнаты:**\n"
-                "`!create [1/2/3/4] [team/random/cap]` — создать комнату\n"
-                "  • `team` — игроки сами выбирают команду\n"
-                "  • `random` — бот распределяет рандомно\n"
-                "  • `cap` — капитаны пикают игроков\n"
-                "`!queue [размер] [режим]` или `!q` — войти в очередь\n"
+                "`!register <ник>` — зарегистрироваться\n"
+                "`!rename <ник>` — сменить ник\n"
+                "`!create [1-4] [team/random/cap]` — создать комнату\n"
+                "`!q [размер] [режим]` — войти в очередь\n"
                 "`!exit` — покинуть комнату\n"
-                "`!kick @игрок` — кикнуть игрока (только капитан)\n"
-                "`!start` — начать игру (оба капитана должны подтвердить)\n\n"
-                "**Результат игры:**\n"
-                "`!win` — заявить победу\n"
-                "`!lose` — заявить поражение\n"
-                "`!draw` — заявить ничью\n\n"
-                "**Профиль и статистика:**\n"
-                "`!profile [@игрок]` — посмотреть профиль\n"
-                "`!elo [day/week/month/all] [@игрок]` — график ELO\n"
-                "`!top` — топ-10 игроков\n\n"
-                "**Прочее:**\n"
-                "`!report @игрок причина` — пожаловаться на игрока\n"
-                "`!help` — список всех команд\n"
+                "`!start` — начать игру\n"
+                "`!win` / `!lose` / `!draw` — результат\n"
+                "`!profile` / `!elo` / `!top` — статистика\n"
+                "`!report @игрок причина` — жалоба\n"
+                "`!help` — все команды"
             ),
-            inline=False,
+            inline=True,
         )
-
-        embed.add_field(
-            name="🇬🇧 English — Bot Commands",
+        embed1.add_field(
+            name="🇬🇧 Bot Commands",
             value=(
-                "**Registration:**\n"
-                "`!register <nickname>` — register yourself (required!)\n"
-                "`!rename <new_nickname>` — change your in-game nickname\n\n"
-                "**Rooms:**\n"
-                "`!create [1/2/3/4] [team/random/cap]` — create a room\n"
-                "  • `team` — players pick their own team\n"
-                "  • `random` — bot assigns teams randomly\n"
-                "  • `cap` — captains pick players one by one\n"
-                "`!queue [size] [mode]` or `!q` — join a queue\n"
-                "`!exit` — leave the room\n"
-                "`!kick @player` — kick a player (captain only)\n"
-                "`!start` — start the game (both captains must confirm)\n\n"
-                "**Game result:**\n"
-                "`!win` — report a win\n"
-                "`!lose` — report a loss\n"
-                "`!draw` — report a draw\n\n"
-                "**Profile & Stats:**\n"
-                "`!profile [@player]` — view player profile\n"
-                "`!elo [day/week/month/all] [@player]` — ELO chart\n"
-                "`!top` — top-10 leaderboard\n\n"
-                "**Other:**\n"
-                "`!report @player reason` — report a player\n"
-                "`!help` — full command list\n"
+                "`!register <nick>` — register\n"
+                "`!rename <nick>` — change nickname\n"
+                "`!create [1-4] [team/random/cap]` — create room\n"
+                "`!q [size] [mode]` — join queue\n"
+                "`!exit` — leave room\n"
+                "`!start` — start game\n"
+                "`!win` / `!lose` / `!draw` — report result\n"
+                "`!profile` / `!elo` / `!top` — stats\n"
+                "`!report @player reason` — report\n"
+                "`!help` — all commands"
             ),
-            inline=False,
+            inline=True,
         )
 
-        embed.add_field(
-            name="📜 Правила / Rules",
+        # Embed 2: правила (отдельный embed — нет ограничений по полям)
+        embed2 = discord.Embed(
+            title="📜 Правила / Rules",
+            color=0xE67E22,
+        )
+        embed2.add_field(
+            name="🇷🇺 Правила",
             value=(
-                "**🇷🇺 Правила**\n"
-                "**1.** Играя на этом сервере, вы **обязаны показать свою игровую консоль** "
-                "по запросу администрации или модераторов в любое время.\n"
-                "**2.** Запрещено использовать оскорбления, токсичное поведение и читы.\n"
-                "**3.** Оба капитана обязаны честно указать результат игры "
-                "(`!win` / `!lose` / `!draw`). Фальсификация результата = бан.\n"
-                "**4.** Если игра началась — нельзя покинуть комнату. "
-                "Незавершённая игра ведёт к штрафу (-ELO на 3 игры).\n"
-                "**5.** Жалобы на игроков: `!report @игрок причина`. Лимит — 5 жалоб в сутки.\n\n"
-                "**🇬🇧 Rules**\n"
-                "**1.** By playing on this server, you are **required to show your game console** "
-                "upon request by the administration or moderators at any time.\n"
-                "**2.** Insults, toxic behaviour, and cheating are strictly prohibited.\n"
-                "**3.** Both captains must report the game result honestly "
-                "(`!win` / `!lose` / `!draw`). Falsifying results = ban.\n"
-                "**4.** Once a game has started, you cannot leave the room. "
-                "An unfinished game results in a penalty (-ELO for 3 games).\n"
-                "**5.** To report a player: `!report @player reason`. Limit — 5 reports per day."
+                "**1.** По запросу администрации вы **обязаны показать игровую консоль**.\n"
+                "**2.** Запрещены оскорбления, токсичность и читы.\n"
+                "**3.** Оба капитана честно указывают результат. Фальсификация = бан.\n"
+                "**4.** Выход из начатой игры = штраф (-ELO на 3 игры).\n"
+                "**5.** Жалобы: `!report @игрок причина`. Лимит — 5/сутки."
             ),
             inline=False,
         )
-
-        embed.set_footer(text="Удачи! / Good luck! 🎮")
+        embed2.add_field(
+            name="🇬🇧 Rules",
+            value=(
+                "**1.** You must **show your game console** on request by admins.\n"
+                "**2.** Insults, toxic behaviour and cheating are prohibited.\n"
+                "**3.** Both captains must report the result honestly. Falsifying = ban.\n"
+                "**4.** Leaving a started game results in a penalty (-ELO for 3 games).\n"
+                "**5.** Reports: `!report @player reason`. Limit — 5/day."
+            ),
+            inline=False,
+        )
+        embed2.set_footer(text="Удачи! / Good luck! 🎮")
 
         # Отправляем ТОЛЬКО в DM. Если DM закрыты — ничего не делаем.
-        # Двойное приветствие возникало из-за отправки и в DM и в канал одновременно.
         try:
-            await member.send(embed=embed)
+            await member.send(embeds=[embed1, embed2])
         except discord.Forbidden:
             pass
 
@@ -2412,56 +2527,19 @@ class Rooms(commands.Cog):
     # ── Модераторские команды ─────────────────────────────────────
 
     @commands.command(name="mod_kick")
-    async def mod_kick(self, ctx: commands.Context, member: discord.Member):
+    async def mod_kick(self, ctx: commands.Context, member: discord.Member = None):
+        """[Мод] Кикнуть игрока из комнаты в любое время. Алиас для !kick @игрок."""
         if not self._is_guild(ctx):
             return
         if not self._is_mod(ctx.author):
             await ctx.send("Нет прав.")
             return
-
-        db = self.bot.db
-        room = await db.get_player_room(member.id)
-        if not room:
-            await ctx.send("Игрок не в комнате.")
+        if member is None:
+            await ctx.send("Укажи игрока: `!mod_kick @игрок`")
             return
-
-        players = await db.get_room_players(room["room_id"])
-        target = next((p for p in players if p["discord_id"] == member.id), None)
-        if not target:
-            return
-
-        was_cap = bool(target["is_captain"])
-        my_team = target["team"]
-        await db.remove_from_room(room["room_id"], member.id)
-
-        guild = ctx.guild
-        channel = guild.get_channel(room["channel_id"])
-        if channel:
-            await self._deny_channel(channel, member)
-            await channel.send(f"🔨 [Мод] {member.mention} кикнут из комнаты.")
-
-        players = await db.get_room_players(room["room_id"])
-        if not players:
-            if channel:
-                await channel.delete()
-            await db.delete_room(room["room_id"])
-            await ctx.send(f"✅ {member.display_name} кикнут (мод). Комната удалена.")
-            return
-
-        if was_cap:
-            team_left = [p for p in players if p["team"] == my_team]
-            if team_left:
-                new_cap = max(team_left, key=lambda p: p["elo"])
-                await db.set_captain(room["room_id"], new_cap["discord_id"], True)
-
-        if room["status"] in ("full", "picking"):
-            await db.update_room_status(room["room_id"], "waiting")
-            await db.set_ready(room["room_id"], 1, False)
-            await db.set_ready(room["room_id"], 2, False)
-
-        await self._refresh_room_embed(room["room_id"])
-        await ctx.send(f"✅ {member.display_name} кикнут (мод).")
-        await self._refresh_lobby()
+        # Передаём в единую логику !kick (мод-ветка)
+        ctx2 = ctx
+        await self.kick(ctx2, member)
 
     @commands.command(name="mod_end")
     async def mod_end(self, ctx: commands.Context, room_id: int):
@@ -2488,36 +2566,17 @@ class Rooms(commands.Cog):
         await self._refresh_lobby()
 
     @commands.command(name="mod_captain")
-    async def mod_captain(self, ctx: commands.Context, member: discord.Member):
+    async def mod_captain(self, ctx: commands.Context, member: discord.Member = None):
+        """[Мод] Назначить игрока капитаном. Алиас для !cap @игрок."""
         if not self._is_guild(ctx):
             return
         if not self._is_mod(ctx.author):
             await ctx.send("Нет прав.")
             return
-
-        db = self.bot.db
-        room = await db.get_player_room(member.id)
-        if not room:
-            await ctx.send("Игрок не в комнате.")
+        if member is None:
+            await ctx.send("Укажи игрока: `!mod_captain @игрок`")
             return
-
-        players = await db.get_room_players(room["room_id"])
-        target = next((p for p in players if p["discord_id"] == member.id), None)
-        if not target:
-            return
-
-        team = target["team"]
-        for p in players:
-            if p["team"] == team and p["is_captain"]:
-                await db.set_captain(room["room_id"], p["discord_id"], False)
-
-        await db.set_captain(room["room_id"], member.id, True)
-        await self._refresh_room_embed(room["room_id"])
-
-        channel = ctx.guild.get_channel(room["channel_id"])
-        if channel:
-            await channel.send(f"👑 [Мод] {member.mention} назначен капитаном команды {team}.")
-        await ctx.send(f"✅ {member.display_name} — новый капитан команды {team}.")
+        await self.become_captain(ctx, member)
 
 
 async def setup(bot):
