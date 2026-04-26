@@ -126,6 +126,13 @@ class Database:
         # Создаём таблицы если их нет
         async with self._pool.acquire() as conn:
             await conn.execute(_SCHEMA)
+            # Миграции: добавляем новые колонки если их нет (безопасно для старых данных)
+            await conn.execute(
+                "ALTER TABLE elo_history ADD COLUMN IF NOT EXISTS mode TEXT"
+            )
+            await conn.execute(
+                "ALTER TABLE elo_history ADD COLUMN IF NOT EXISTS size INTEGER"
+            )
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -185,6 +192,8 @@ class Database:
         new_elo: int,
         result: str,   # 'win' | 'lose' | 'draw'
         game_id: int,
+        mode: str = None,
+        size: int = None,
     ):
         pl = await self.get_player(discord_id)
         if not pl:
@@ -222,9 +231,9 @@ class Database:
                     )
                 await conn.execute(
                     """INSERT INTO elo_history
-                       (discord_id, elo_before, elo_after, change, game_id)
-                       VALUES ($1,$2,$3,$4,$5)""",
-                    discord_id, elo_before, new_elo, new_elo - elo_before, game_id,
+                       (discord_id, elo_before, elo_after, change, game_id, mode, size)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+                    discord_id, elo_before, new_elo, new_elo - elo_before, game_id, mode, size,
                 )
 
     async def apply_penalty(self, discord_id: int):
@@ -540,11 +549,17 @@ class Database:
             )
 
     async def get_elo_history_simple(self, discord_id: int) -> list[_Row]:
-        """Возвращает историю игр (win/lose/draw) в хронологическом порядке."""
+        """
+        Возвращает историю всех игр для !streak.
+        Читает из elo_history — там есть ВСЕ игры включая сыгранные до обновления.
+        Для прошлых игр mode/size = NULL (отображаем как '?').
+        result выводится из знака change: >0 = win, <0 = lose, 0 = draw.
+        """
         rows = await self.pool.fetch(
-            """SELECT DISTINCT ON (game_id) game_id, result, played_at
-               FROM game_results WHERE discord_id=$1
-               ORDER BY game_id, played_at""",
+            """SELECT id, game_id, elo_before, elo_after, change, mode, size, timestamp
+               FROM elo_history
+               WHERE discord_id=$1
+               ORDER BY timestamp ASC, id ASC""",
             discord_id,
         )
         return _rows(rows)
