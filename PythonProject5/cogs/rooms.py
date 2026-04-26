@@ -1654,10 +1654,6 @@ class Rooms(commands.Cog):
             await ctx.send("Ты не найден в комнате.")
             return
 
-        if me["is_captain"] and me["team"] != 0:
-            await ctx.send("Капитан не может менять команду.")
-            return
-
         size = room["size"]
         team_players = [p for p in players if p["team"] == team]
 
@@ -1666,14 +1662,35 @@ class Rooms(commands.Cog):
             return
 
         old_team = me["team"]
+
+        # Если капитан переходит из одной команды в другую — снимаем капитанство со старой
+        # и назначим на новую только если там ещё нет своего капитана
+        if me["is_captain"] and old_team != 0 and old_team != team:
+            await db.set_captain(room["room_id"], ctx.author.id, False)
+
         await db.set_player_team(room["room_id"], ctx.author.id, team)
 
-        # Сразу назначаем капитаном первого вставшего в team2
+        # Назначаем капитана team2 только если его ещё нет вообще.
+        # Это срабатывает ровно один раз — для первого игрока вставшего в team2.
         if team == 2:
             players_now = await db.get_room_players(room["room_id"])
             team2_now = [p for p in players_now if p["team"] == 2]
             if not any(p["is_captain"] for p in team2_now):
+                # Первый в team2 — назначаем капитаном
                 await db.set_captain(room["room_id"], ctx.author.id, True)
+            # Если у нас был снят капитан (перешёл из team2 в team2 не бывает,
+            # но если был снят выше) — тот же игрок снова капитан новой команды
+            elif me["is_captain"] and old_team == 2:
+                # Переходит внутри team2 — не меняем ничего, уже обработано выше
+                pass
+
+        # Если игрок уходит из team2 и там не осталось капитана — назначаем нового
+        if old_team == 2 and team != 2:
+            players_now = await db.get_room_players(room["room_id"])
+            team2_now = [p for p in players_now if p["team"] == 2]
+            if team2_now and not any(p["is_captain"] for p in team2_now):
+                new_cap = team2_now[0]
+                await db.set_captain(room["room_id"], new_cap["discord_id"], True)
 
         guild = ctx.guild
         channel = guild.get_channel(room["channel_id"])
@@ -1687,7 +1704,8 @@ class Rooms(commands.Cog):
 
         if len(t1) == size and len(t2) == size:
             await db.update_room_status(room["room_id"], "full")
-            await self._assign_team2_captain(room["room_id"])
+            # НЕ вызываем _assign_team2_captain здесь — капитан team2 уже назначен
+            # при первом входе в команду. Повторный вызов мог бы назначить 3-го игрока.
             if channel:
                 await channel.send("🎯 Команды сформированы! Капитаны, нажмите **▶ Start** чтобы начать!")
                 await self._announce_strong_side(channel, room["room_id"])
