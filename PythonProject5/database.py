@@ -74,6 +74,17 @@ CREATE TABLE IF NOT EXISTS reports (
     reason      TEXT    NOT NULL,
     created_at  TIMESTAMP DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS game_results (
+    id           SERIAL    PRIMARY KEY,
+    game_id      INTEGER   NOT NULL,
+    discord_id   BIGINT    NOT NULL REFERENCES players(discord_id),
+    opponent_id  BIGINT    NOT NULL REFERENCES players(discord_id),
+    result       TEXT      NOT NULL,  -- 'win' | 'lose' | 'draw'
+    played_at    TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_game_results_discord ON game_results(discord_id);
+CREATE INDEX IF NOT EXISTS idx_game_results_opponent ON game_results(opponent_id);
 """
 
 
@@ -507,3 +518,56 @@ class Database:
         await self.pool.execute(
             "DELETE FROM room_screenshots WHERE room_id=$1", room_id
         )
+    async def save_game_results(self, game_id: int, team1: list, team2: list, result: str):
+        """
+        Сохраняет парные результаты для каждого игрока относительно каждого оппонента.
+        result — результат для команды 1: 'win'|'lose'|'draw'
+        """
+        rows = []
+        # team1 против team2
+        for p1 in team1:
+            for p2 in team2:
+                r1 = result            # результат игрока из team1
+                r2 = "lose" if result == "win" else ("win" if result == "lose" else "draw")
+                rows.append((game_id, p1["discord_id"], p2["discord_id"], r1))
+                rows.append((game_id, p2["discord_id"], p1["discord_id"], r2))
+        if not rows:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.executemany(
+                "INSERT INTO game_results (game_id, discord_id, opponent_id, result) VALUES ($1,$2,$3,$4)",
+                rows,
+            )
+
+    async def get_elo_history_simple(self, discord_id: int) -> list[_Row]:
+        """Возвращает историю игр (win/lose/draw) в хронологическом порядке."""
+        rows = await self.pool.fetch(
+            """SELECT DISTINCT ON (game_id) game_id, result, played_at
+               FROM game_results WHERE discord_id=$1
+               ORDER BY game_id, played_at""",
+            discord_id,
+        )
+        return _rows(rows)
+
+    async def get_stat_vs_players(self, discord_id: int) -> list[_Row]:
+        """
+        Возвращает статистику побед/поражений/ничьих против каждого оппонента.
+        Сортировка: сначала по wins DESC, затем по losses DESC.
+        """
+        rows = await self.pool.fetch(
+            """SELECT
+                gr.opponent_id,
+                p.username,
+                COUNT(*) FILTER (WHERE gr.result='win')  AS wins,
+                COUNT(*) FILTER (WHERE gr.result='lose') AS losses,
+                COUNT(*) FILTER (WHERE gr.result='draw') AS draws,
+                COUNT(*) AS total
+               FROM game_results gr
+               JOIN players p ON p.discord_id = gr.opponent_id
+               WHERE gr.discord_id = $1
+               GROUP BY gr.opponent_id, p.username
+               ORDER BY wins DESC, losses DESC""",
+            discord_id,
+        )
+        return _rows(rows)
+
