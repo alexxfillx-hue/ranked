@@ -89,7 +89,7 @@ class CreateRoomButton(discord.ui.Button):
         await db.update_channel_id(room_id, channel.id)
 
         if self.mode == "team":
-            await db.add_to_room(room_id, interaction.user.id, team=1, is_captain=True)
+            await db.add_to_room(room_id, interaction.user.id, team=1, is_captain=False)
         else:
             await db.add_to_room(room_id, interaction.user.id, team=0, is_captain=False)
 
@@ -235,9 +235,7 @@ class JoinButton(discord.ui.Button):
 
         await db.add_to_room(self.room_id, interaction.user.id, team=team)
 
-        # В режиме team — сразу назначаем капитана если игрок попал в team2
-        if mode == "team" and team == 2:
-            await db.set_captain(self.room_id, interaction.user.id, True)
+        # В режиме team — капитанов нет, все игроки равны
 
         guild = interaction.guild
         rooms_cog = bot.cogs.get("Rooms")
@@ -260,9 +258,8 @@ class JoinButton(discord.ui.Button):
                 await rooms_cog._start_captain_pick(self.room_id, players, self.size, channel)
             elif mode == "team":
                 await db.update_room_status(self.room_id, "full")
-                await rooms_cog._assign_team2_captain(self.room_id)
                 if channel:
-                    await channel.send("🎯 Комната заполнена! Капитаны, нажмите **▶ Start** чтобы начать!")
+                    await channel.send("🎯 Комната заполнена! Нажмите **▶ Start** чтобы начать!")
 
         if rooms_cog:
             await rooms_cog._refresh_room_embed(self.room_id)
@@ -459,26 +456,22 @@ class PickTeamButton(discord.ui.Button):
         if not me:
             await interaction.response.send_message("Ты не найден в комнате.", ephemeral=True)
             return
-        if me["is_captain"] and me["team"] != 0:
-            await interaction.response.send_message("Капитан не может менять команду.", ephemeral=True)
+
+        # Уже в этой команде
+        if me["team"] == self.team:
+            await interaction.response.send_message(f"Ты уже в Команде {self.team}.", ephemeral=True)
             return
 
         size = room["size"]
         team_players = [p for p in players if p["team"] == self.team]
         if len(team_players) >= size:
             await interaction.response.send_message(
-                f"Команда {self.team} уже заполнена ({size}/{size}).", ephemeral=True
+                f"Команда {self.team} уже заполнена ({size}/{size}). Сначала кто-то должен перейти из неё.",
+                ephemeral=True
             )
             return
 
         await db.set_player_team(self.room_id, interaction.user.id, self.team)
-
-        # Сразу назначаем капитаном первого вставшего в team2
-        if self.team == 2:
-            players_now = await db.get_room_players(self.room_id)
-            team2_now = [p for p in players_now if p["team"] == 2]
-            if not any(p["is_captain"] for p in team2_now):
-                await db.set_captain(self.room_id, interaction.user.id, True)
 
         guild = interaction.guild
         channel = guild.get_channel(room["channel_id"]) if guild else None
@@ -490,12 +483,15 @@ class PickTeamButton(discord.ui.Button):
         t2 = [p for p in players if p["team"] == 2]
 
         rooms_cog = interaction.client.cogs.get("Rooms")
-        if len(t1) == size and len(t2) == size and rooms_cog:
+        if len(t1) == size and len(t2) == size:
             await db.update_room_status(self.room_id, "full")
-            await rooms_cog._assign_team2_captain(self.room_id)
             if channel:
-                await channel.send("🎯 Команды сформированы! Капитаны, нажмите **▶ Start** чтобы начать!")
-                await rooms_cog._announce_strong_side(channel, self.room_id)
+                await channel.send("🎯 Команды сформированы! Нажмите **▶ Start** чтобы начать!")
+                if rooms_cog:
+                    await rooms_cog._announce_strong_side(channel, self.room_id)
+        else:
+            if room["status"] == "full":
+                await db.update_room_status(self.room_id, "waiting")
 
         if rooms_cog:
             await rooms_cog._refresh_room_embed(self.room_id)
@@ -549,23 +545,33 @@ class VoteButton(discord.ui.Button):
 
         players = await db.get_room_players(self.room_id)
         me = next((p for p in players if p["discord_id"] == interaction.user.id), None)
-        if not me or not me["is_captain"]:
+        if not me:
+            await interaction.response.send_message("Ты не в этой игре.", ephemeral=True)
+            return
+
+        # В cap/random режиме — только капитан голосует; в team-режиме — любой игрок
+        if room["mode"] != "team" and not me["is_captain"]:
             await interaction.response.send_message("Только капитан может голосовать.", ephemeral=True)
             return
 
-        # Записываем голос и сразу отвечаем пользователю
         # Проверяем что хотя бы один скрин загружен
-        db_check = interaction.client.db
-        screenshots = await db_check.get_screenshots(self.room_id)
+        screenshots = await db.get_screenshots(self.room_id)
         if not screenshots:
             await interaction.response.send_message(
-                "⚠️ Сначала любой капитан должен загрузить скриншот результата в чат.", ephemeral=True
+                "⚠️ Сначала загрузи скриншот результата в чат.", ephemeral=True
+            )
+            return
+
+        # Проверяем — не проголосовал ли уже этот игрок
+        if me["end_vote"]:
+            await interaction.response.send_message(
+                f"Ты уже проголосовал: **{me['end_vote']}**.", ephemeral=True
             )
             return
 
         await db.set_end_vote(self.room_id, interaction.user.id, self.vote)
         await interaction.response.send_message(
-            f"✅ Твой голос: **{self.vote}**. Ждём второго капитана.", ephemeral=True
+            f"✅ Твой голос: **{self.vote}**. Ждём голоса с другой команды.", ephemeral=True
         )
 
         # Получаем (или создаём) lock для этой комнаты
@@ -577,33 +583,7 @@ class VoteButton(discord.ui.Button):
                 return  # другой вызов уже финализирует
 
             players = await db.get_room_players(self.room_id)
-            cap1 = next((p for p in players if p["team"] == 1 and p["is_captain"]), None)
-            cap2 = next((p for p in players if p["team"] == 2 and p["is_captain"]), None)
-
-            if not (cap1 and cap2 and cap1["end_vote"] and cap2["end_vote"]):
-                return  # ещё не все проголосовали
-
-            v1, v2 = cap1["end_vote"], cap2["end_vote"]
-            valid = (
-                (v1 == "win" and v2 == "lose")
-                or (v1 == "lose" and v2 == "win")
-                or (v1 == "draw" and v2 == "draw")
-            )
-            if not valid:
-                # Несовместимые голоса — сбрасываем оба
-                await db.set_end_vote(self.room_id, cap1["discord_id"], None)
-                await db.set_end_vote(self.room_id, cap2["discord_id"], None)
-                guild = interaction.guild
-                channel = guild.get_channel(room["channel_id"]) if guild else None
-                if channel:
-                    await channel.send(
-                        "⚠️ Капитаны дали несовместимые ответы. "
-                        "Допустимо: (🏆 Победа + 💀 Поражение) или (🤝 Ничья + 🤝 Ничья). "
-                        "Нажмите кнопки заново."
-                    )
-                return
-
-            await rooms_cog._finalize_game(room, players, cap1, cap2, v1, v2)
+            await rooms_cog._try_resolve_votes(room, players, interaction.guild)
 
 
 class RoomView(discord.ui.View):
@@ -992,9 +972,9 @@ class Rooms(commands.Cog):
         await db.update_channel_id(room_id, channel.id)
 
         # В режиме cap и random — создатель пока без команды (team=0),
-        # в режиме team — создатель сразу капитан команды 1
+        # в режиме team — создатель в team=1, без капитанства (в team-режиме капитанов нет)
         if mode == "team":
-            await db.add_to_room(room_id, ctx.author.id, team=1, is_captain=True)
+            await db.add_to_room(room_id, ctx.author.id, team=1, is_captain=False)
         else:
             await db.add_to_room(room_id, ctx.author.id, team=0, is_captain=False)
 
@@ -1215,9 +1195,7 @@ class Rooms(commands.Cog):
 
         await db.add_to_room(room_id, ctx.author.id, team=team)
 
-        # В режиме team — сразу назначаем капитана если игрок попал в team2
-        if mode == "team" and team == 2:
-            await db.set_captain(room_id, ctx.author.id, True)
+        # В team-режиме капитанов нет
 
         guild = ctx.guild
         channel = guild.get_channel(room["channel_id"])
@@ -1238,9 +1216,8 @@ class Rooms(commands.Cog):
                 await self._start_captain_pick(room_id, players, size, channel)
             elif mode == "team":
                 await db.update_room_status(room_id, "full")
-                await self._assign_team2_captain(room_id)
                 if channel:
-                    await channel.send("🎯 Комната заполнена! Капитаны, нажмите **▶ Start** чтобы начать!")
+                    await channel.send("🎯 Комната заполнена! Нажмите **▶ Start** чтобы начать!")
 
         await self._refresh_room_embed(room_id)
         if channel:
@@ -1319,6 +1296,15 @@ class Rooms(commands.Cog):
         if not room or room["status"] not in ("full", "waiting"):
             return
 
+        # Сбрасываем всех текущих капитанов и команды перед переназначением
+        for p in players:
+            if p["is_captain"]:
+                await db.set_captain(room_id, p["discord_id"], False)
+            # Сбрасываем команды у всех (кроме уже назначенных капитанами)
+            await db.set_player_team(room_id, p["discord_id"], 0)
+
+        # Перечитываем после сброса
+        players = await db.get_room_players(room_id)
         all_players = list(players)
         random.shuffle(all_players)
         cap1 = all_players[0]
@@ -1466,15 +1452,11 @@ class Rooms(commands.Cog):
             await ctx.send("❌ Команда `!random` доступна только в режиме **капитанского пика**.")
             return
 
-        if room["status"] == "picking":
-            await ctx.send("❌ Пик уже начался.")
-            return
-
         if room["status"] in ("started", "awaiting_screenshot"):
             await ctx.send("❌ Игра уже идёт.")
             return
 
-        if room["status"] not in ("waiting", "full"):
+        if room["status"] not in ("waiting", "full", "picking"):
             await ctx.send("❌ Комната не в нужном состоянии.")
             return
 
@@ -1483,6 +1465,10 @@ class Rooms(commands.Cog):
         if len(players) < total_slots:
             await ctx.send(f"❌ Комната ещё не заполнена ({len(players)}/{total_slots}).")
             return
+
+        # Если пик уже шёл — сбрасываем обратно в full и переназначаем
+        if room["status"] == "picking":
+            await db.update_room_status(room["room_id"], "full")
 
         guild = ctx.guild
         channel = guild.get_channel(room["channel_id"])
@@ -1509,9 +1495,20 @@ class Rooms(commands.Cog):
             await ctx.send("❌ Команда `!cap` доступна только в режиме **капитанского пика**.")
             return
 
-        if room["status"] in ("picking", "started"):
-            await ctx.send("❌ Пик уже начался — менять капитана нельзя.")
+        if room["status"] == "started":
+            await ctx.send("❌ Игра уже идёт — менять капитана нельзя.")
             return
+
+        # При статусе picking (!random уже запустил пик) — сбрасываем обратно в full
+        # чтобы можно было выбрать капитанов через !cap заново
+        if room["status"] == "picking":
+            # Сбрасываем всех капитанов и их команды
+            players_tmp = await db.get_room_players(room["room_id"])
+            for p in players_tmp:
+                if p["is_captain"]:
+                    await db.set_captain(room["room_id"], p["discord_id"], False)
+                await db.set_player_team(room["room_id"], p["discord_id"], 0)
+            await db.update_room_status(room["room_id"], "full")
 
         players = await db.get_room_players(room["room_id"])
         me = next((p for p in players if p["discord_id"] == ctx.author.id), None)
@@ -1655,42 +1652,18 @@ class Rooms(commands.Cog):
             return
 
         size = room["size"]
-        team_players = [p for p in players if p["team"] == team]
 
-        if len(team_players) >= size:
-            await ctx.send(f"Команда {team} уже заполнена ({size}/{size}).")
+        # Нельзя встать в ту же команду
+        if me["team"] == team:
+            await ctx.send(f"Ты уже в Команде {team}.")
             return
 
-        old_team = me["team"]
-
-        # Если капитан переходит из одной команды в другую — снимаем капитанство со старой
-        # и назначим на новую только если там ещё нет своего капитана
-        if me["is_captain"] and old_team != 0 and old_team != team:
-            await db.set_captain(room["room_id"], ctx.author.id, False)
+        team_players = [p for p in players if p["team"] == team]
+        if len(team_players) >= size:
+            await ctx.send(f"Команда {team} уже заполнена ({size}/{size}). Сначала кто-то должен перейти из неё.")
+            return
 
         await db.set_player_team(room["room_id"], ctx.author.id, team)
-
-        # Назначаем капитана team2 только если его ещё нет вообще.
-        # Это срабатывает ровно один раз — для первого игрока вставшего в team2.
-        if team == 2:
-            players_now = await db.get_room_players(room["room_id"])
-            team2_now = [p for p in players_now if p["team"] == 2]
-            if not any(p["is_captain"] for p in team2_now):
-                # Первый в team2 — назначаем капитаном
-                await db.set_captain(room["room_id"], ctx.author.id, True)
-            # Если у нас был снят капитан (перешёл из team2 в team2 не бывает,
-            # но если был снят выше) — тот же игрок снова капитан новой команды
-            elif me["is_captain"] and old_team == 2:
-                # Переходит внутри team2 — не меняем ничего, уже обработано выше
-                pass
-
-        # Если игрок уходит из team2 и там не осталось капитана — назначаем нового
-        if old_team == 2 and team != 2:
-            players_now = await db.get_room_players(room["room_id"])
-            team2_now = [p for p in players_now if p["team"] == 2]
-            if team2_now and not any(p["is_captain"] for p in team2_now):
-                new_cap = team2_now[0]
-                await db.set_captain(room["room_id"], new_cap["discord_id"], True)
 
         guild = ctx.guild
         channel = guild.get_channel(room["channel_id"])
@@ -1704,11 +1677,12 @@ class Rooms(commands.Cog):
 
         if len(t1) == size and len(t2) == size:
             await db.update_room_status(room["room_id"], "full")
-            # НЕ вызываем _assign_team2_captain здесь — капитан team2 уже назначен
-            # при первом входе в команду. Повторный вызов мог бы назначить 3-го игрока.
             if channel:
-                await channel.send("🎯 Команды сформированы! Капитаны, нажмите **▶ Start** чтобы начать!")
+                await channel.send("🎯 Команды сформированы! Нажмите **▶ Start** чтобы начать!")
                 await self._announce_strong_side(channel, room["room_id"])
+        else:
+            if room["status"] == "full":
+                await db.update_room_status(room["room_id"], "waiting")
 
         await self._refresh_room_embed(room["room_id"])
         await ctx.send(f"✅ Ты выбрал Команду {team}.")
@@ -1890,7 +1864,13 @@ class Rooms(commands.Cog):
             return
 
         me = next((p for p in players if p["discord_id"] == user.id), None)
-        if not me or not me["is_captain"]:
+        if not me:
+            if hasattr(channel, "send"):
+                await channel.send("Ты не в этой комнате.")
+            return
+
+        # В team-режиме старт может нажать любой игрок; в cap/random — только капитан
+        if room["mode"] != "team" and not me["is_captain"]:
             if hasattr(channel, "send"):
                 await channel.send("Только капитаны могут запустить игру.")
             return
@@ -1910,14 +1890,13 @@ class Rooms(commands.Cog):
             await room_channel.send(embed=strong_embed)
 
             mentions = " ".join(f"<@{p['discord_id']}>" for p in players)
+            if room["mode"] == "team":
+                screenshot_note = "📸 **По окончании игры** любой игрок должен прислать скриншот результата прямо в этот канал.\n\nПосле этого **минимум по одному игроку с каждой команды** должны нажать кнопку результата."
+            else:
+                screenshot_note = "📸 **По окончании игры** капитан должен прислать скриншот результата прямо в этот канал.\n\nПосле получения скриншота появятся кнопки **Победа / Ничья / Поражение**."
             start_embed = discord.Embed(
                 title="🚀 ИГРА НАЧАЛАСЬ!",
-                description=(
-                    f"{mentions}\n\n"
-                    "📸 **По окончании игры** любой капитан должен прислать **один скриншот результата** "
-                    "прямо в этот канал.\n\n"
-                    "После получения скриншота появятся кнопки **Победа / Ничья / Поражение**."
-                ),
+                description=f"{mentions}\n\n{screenshot_note}",
                 color=0x57F287,
             )
             await room_channel.send(embed=start_embed)
@@ -1950,52 +1929,84 @@ class Rooms(commands.Cog):
 
         players = await db.get_room_players(room["room_id"])
         me = next((p for p in players if p["discord_id"] == ctx.author.id), None)
+        if not me:
+            await ctx.send("Ты не найден в комнате.")
+            return
 
-        if not me or not me["is_captain"]:
+        # В cap/random режиме — только капитан; в team — любой игрок
+        if room["mode"] != "team" and not me["is_captain"]:
             await ctx.send("Только капитаны могут завершить игру.")
             return
 
         # Проверяем что хотя бы один скрин загружен
         screenshots = await db.get_screenshots(room["room_id"])
         if not screenshots:
-            await ctx.send("⚠️ Сначала любой капитан должен загрузить скриншот результата в чат.")
+            await ctx.send("⚠️ Сначала загрузи скриншот результата в чат.")
+            return
+
+        if me["end_vote"]:
+            await ctx.send(f"Ты уже проголосовал: **{me['end_vote']}**.")
             return
 
         await db.set_end_vote(room["room_id"], ctx.author.id, vote)
-        await ctx.send(f"✅ Голос принят: **{vote}**. Ждём второго капитана.")
+        await ctx.send(f"✅ Голос принят: **{vote}**. Ждём голоса с другой команды.")
 
         # Тот же lock что и в VoteButton — единая точка финализации
         lock = self._finalize_locks.setdefault(room["room_id"], asyncio.Lock())
         async with lock:
-            # Перечитываем всё ВНУТРИ лока
             current_room = await db.get_room(room["room_id"])
             if not current_room or current_room["status"] != "started":
                 return
-
             players = await db.get_room_players(room["room_id"])
-            cap1 = next((p for p in players if p["team"] == 1 and p["is_captain"]), None)
-            cap2 = next((p for p in players if p["team"] == 2 and p["is_captain"]), None)
+            await self._try_resolve_votes(current_room, players, ctx.guild)
 
-            if not (cap1 and cap2 and cap1["end_vote"] and cap2["end_vote"]):
-                return
+    async def _try_resolve_votes(self, room, players, guild):
+        """
+        Проверяет состояние голосования и финализирует игру если условия выполнены.
+        team-режим: нужен хотя бы 1 голос от каждой команды, и они должны совпадать.
+        cap/random-режим: нужен голос от обоих капитанов.
+        Вызывается ВНУТРИ finalize_lock.
+        """
+        db = self.bot.db
+        room_id = room["room_id"]
+        mode = room["mode"]
 
-            v1, v2 = cap1["end_vote"], cap2["end_vote"]
-            valid = (
-                (v1 == "win" and v2 == "lose")
-                or (v1 == "lose" and v2 == "win")
-                or (v1 == "draw" and v2 == "draw")
-            )
+        team1 = [p for p in players if p["team"] == 1]
+        team2 = [p for p in players if p["team"] == 2]
 
-            if not valid:
-                await ctx.send(
-                    "⚠️ Капитаны дали несовместимые ответы. "
-                    "Допустимо: (win+lose) или (draw+draw). Введите заново."
+        if mode == "team":
+            voter1 = next((p for p in team1 if p["end_vote"]), None)
+            voter2 = next((p for p in team2 if p["end_vote"]), None)
+            vote1 = voter1["end_vote"] if voter1 else None
+            vote2 = voter2["end_vote"] if voter2 else None
+        else:
+            voter1 = next((p for p in players if p["team"] == 1 and p["is_captain"]), None)
+            voter2 = next((p for p in players if p["team"] == 2 and p["is_captain"]), None)
+            vote1 = voter1["end_vote"] if voter1 else None
+            vote2 = voter2["end_vote"] if voter2 else None
+
+        if not (vote1 and vote2):
+            return  # ещё не все проголосовали
+
+        valid = (
+            (vote1 == "win" and vote2 == "lose")
+            or (vote1 == "lose" and vote2 == "win")
+            or (vote1 == "draw" and vote2 == "draw")
+        )
+        if not valid:
+            for p in players:
+                if p["end_vote"]:
+                    await db.set_end_vote(room_id, p["discord_id"], None)
+            channel = guild.get_channel(room["channel_id"]) if guild else None
+            if channel:
+                await channel.send(
+                    "⚠️ Голоса команд не совпадают. "
+                    "Допустимо: (🏆 Победа + 💀 Поражение) или (🤝 Ничья + 🤝 Ничья). "
+                    "Проголосуйте заново."
                 )
-                await db.set_end_vote(room["room_id"], cap1["discord_id"], None)
-                await db.set_end_vote(room["room_id"], cap2["discord_id"], None)
-                return
+            return
 
-            await self._finalize_game(current_room, players, cap1, cap2, v1, v2)
+        await self._finalize_game(room, players, voter1, voter2, vote1, vote2)
 
     async def _finalize_game(self, room, players, cap1, cap2, v1, v2):
         db = self.bot.db
@@ -2177,7 +2188,11 @@ class Rooms(commands.Cog):
 
         players = await db.get_room_players(room["room_id"])
         me = next((p for p in players if p["discord_id"] == message.author.id), None)
-        if not me or not me["is_captain"]:
+        if not me:
+            return
+
+        # В team-режиме скрин может загрузить любой игрок; в cap/random — только капитан
+        if room["mode"] != "team" and not me["is_captain"]:
             return
 
         # Проверяем что вложение — изображение
@@ -2191,11 +2206,11 @@ class Rooms(commands.Cog):
         room_id = room["room_id"]
         my_team = me["team"]
 
-        # Сохраняем скрин
+        # Сохраняем скрин (только первый от каждой команды)
         await db.add_screenshot(room_id, my_team, message.author.id)
         await message.add_reaction("✅")
 
-        # Достаточно одного скрина от любого капитана — сразу показываем кнопки
+        # Достаточно одного скрина — сразу показываем кнопки
         screenshots = await db.get_screenshots(room_id)
         if len(screenshots) == 1:
             # Первый скрин — пересылаем в канал результатов
@@ -2208,13 +2223,21 @@ class Rooms(commands.Cog):
                     files=files,
                 )
 
-            vote_embed = discord.Embed(
-                title="📸 Скриншот получен! Голосуйте за результат",
-                description=(
+            if room["mode"] == "team":
+                vote_desc = (
+                    f"Скрин от {message.author.mention} принят.\n\n"
+                    "**Минимум по одному игроку с каждой команды** должны нажать кнопку результата:\n"
+                    "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**"
+                )
+            else:
+                vote_desc = (
                     f"Скрин от {message.author.mention} принят.\n\n"
                     "Капитаны — нажмите кнопку с вашим результатом:\n"
                     "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**"
-                ),
+                )
+            vote_embed = discord.Embed(
+                title="📸 Скриншот получен! Голосуйте за результат",
+                description=vote_desc,
                 color=0xF1C40F,
             )
             await message.channel.send(embed=vote_embed, view=VoteEndView(room_id))

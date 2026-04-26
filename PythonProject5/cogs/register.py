@@ -71,13 +71,20 @@ class LangButton(discord.ui.Button):
         ok = await db.register(interaction.user.id, nickname)
         if ok:
             await db.set_lang(interaction.user.id, lang)
+            # Получаем Member (не просто User) для edit() и sync_rank_role()
+            guild = interaction.guild
+            member = guild.get_member(interaction.user.id) if guild else None
+            if member is None:
+                member = interaction.user
             try:
-                await interaction.user.edit(nick=nickname, reason="Регистрация в боте")
-            except discord.Forbidden:
+                await member.edit(nick=nickname, reason="Регистрация в боте")
+            except (discord.Forbidden, AttributeError):
                 pass
 
-            if reg_cog:
-                await reg_cog._sync_rank_role(interaction.user, Config.STARTING_ELO)
+            if reg_cog and guild:
+                m = guild.get_member(interaction.user.id)
+                if m:
+                    await reg_cog._sync_rank_role(m, Config.STARTING_ELO)
 
             embed = discord.Embed(
                 title=t("register_ok_title", lang),
@@ -250,6 +257,7 @@ class Register(commands.Cog):
         await ctx.send(f"✅ Роль **{rank_name}** выдана для {target.mention} (ELO: {player['elo']})")
 
 
+    @commands.command(name="rename")
     async def rename(self, ctx: commands.Context, *, new_nick: str = None):
         if not self._guild_check(ctx):
             return
