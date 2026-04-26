@@ -1922,6 +1922,17 @@ class Rooms(commands.Cog):
             await ctx.send("Ты не в комнате.")
             return
 
+        # Проверяем что команда написана в канале комнаты
+        if room["channel_id"] != ctx.channel.id:
+            guild = ctx.guild
+            room_channel = guild.get_channel(room["channel_id"]) if guild else None
+            if room_channel:
+                await ctx.send(
+                    f"❌ Команду `!start` нужно писать в канале твоей комнаты: {room_channel.mention}",
+                    delete_after=10,
+                )
+            return
+
         await self._do_start(ctx.author, ctx.channel, room["room_id"])
 
     async def _do_start(
@@ -1935,14 +1946,19 @@ class Rooms(commands.Cog):
         if not room:
             return
 
+        # Всегда отправляем сообщения об ошибках в канал комнаты
+        guild = self.bot.get_guild(Config.GUILD_ID)
+        room_channel = guild.get_channel(room["channel_id"]) if guild else channel
+        reply_channel = room_channel if room_channel else channel
+
         if room["status"] == "started":
-            if hasattr(channel, "send"):
-                await channel.send("Игра уже идёт.")
+            if hasattr(reply_channel, "send"):
+                await reply_channel.send("Игра уже идёт.")
             return
 
         if room["status"] == "picking":
-            if hasattr(channel, "send"):
-                await channel.send("Пик ещё не завершён.")
+            if hasattr(reply_channel, "send"):
+                await reply_channel.send("Пик ещё не завершён.")
             return
 
         if room["status"] not in ("waiting", "full"):
@@ -1953,79 +1969,80 @@ class Rooms(commands.Cog):
 
         me = next((p for p in players if p["discord_id"] == user.id), None)
         if not me:
-            if hasattr(channel, "send"):
-                await channel.send("Ты не в этой комнате.")
+            if hasattr(reply_channel, "send"):
+                await reply_channel.send("Ты не в этой комнате.")
             return
 
-        # ── cap-режим: !start запускает пик, а не игру ─────────────
+        # ── cap-режим: !start запускает пик, а после пика — игру ─────
         if room["mode"] == "cap":
-            # Только капитан может запустить пик
+            # Только капитан может запустить
             if not me["is_captain"]:
-                if hasattr(channel, "send"):
-                    await channel.send("Только капитаны могут запустить пик.")
+                if hasattr(reply_channel, "send"):
+                    await reply_channel.send("Только капитаны могут запустить пик.")
                 return
             caps = [p for p in players if p["is_captain"]]
             if len(caps) < 2:
-                if hasattr(channel, "send"):
-                    await channel.send("❌ Нужно два капитана. Используйте `!cap` или `!random`.")
+                if hasattr(reply_channel, "send"):
+                    await reply_channel.send("❌ Нужно два капитана. Используйте `!cap` или `!random`.")
                 return
             total_slots = size * 2
             if len(players) < total_slots:
-                if hasattr(channel, "send"):
-                    await channel.send(f"❌ Комната ещё не заполнена ({len(players)}/{total_slots}).")
+                if hasattr(reply_channel, "send"):
+                    await reply_channel.send(f"❌ Комната ещё не заполнена ({len(players)}/{total_slots}).")
                 return
-            # Запускаем пик: выбираем кто пикует первым рандомно
-            first_pick_team = random.choice([1, 2])
-            second_pick_team = 2 if first_pick_team == 1 else 1
-            await db.set_pick_turn(room_id, first_pick_team)
-            # Сильная сторона — тот кто пикует ВТОРЫМ (компенсация за выбор последним)
-            await db.set_strong_side(room_id, second_pick_team)
-            await db.update_room_status(room_id, "picking")
-            await self._refresh_lobby()
-            cap1 = next((p for p in caps if p["team"] == 1), None)
-            cap2 = next((p for p in caps if p["team"] == 2), None)
-            first_cap = cap1 if first_pick_team == 1 else cap2
-            second_cap = cap2 if first_pick_team == 1 else cap1
-            guild = self.bot.get_guild(Config.GUILD_ID)
-            room_channel = guild.get_channel(room["channel_id"]) if guild else channel
-            if room_channel:
-                # Сильная сторона достаётся тому, кто пикует ВТОРЫМ
-                strong_side = "🔵 Команда 1" if second_pick_team == 1 else "🔴 Команда 2"
-                strong_embed = discord.Embed(
-                    title="🎯 Капитанский пик начался!",
-                    description=(
-                        f"👑 Капитан команды 1: <@{cap1['discord_id']}>\n"
-                        f"👑 Капитан команды 2: <@{cap2['discord_id']}>\n\n"
-                        f"**Первым пикует: <@{first_cap['discord_id']}>** (Команда {first_pick_team})\n\n"
-                        f"⚔️ **Сильная сторона: {strong_side}** (пикует вторым — <@{second_cap['discord_id']}>)"
-                    ),
-                    color=0xE67E22,
-                )
-                await room_channel.send(embed=strong_embed)
-                await self._send_pick_message(room_id, room_channel, first_pick_team)
-            await self._refresh_room_embed(room_id)
-            return
+
+            # Если пик уже завершён (нет нераспределённых) — запускаем игру (продолжаем ниже)
+            unpicked = [p for p in players if p["team"] == 0]
+            if unpicked:
+                # Пик ещё не начат — запускаем пик
+                first_pick_team = random.choice([1, 2])
+                second_pick_team = 2 if first_pick_team == 1 else 1
+                await db.set_pick_turn(room_id, first_pick_team)
+                # Сильная сторона — тот кто пикует ВТОРЫМ (компенсация за выбор последним)
+                await db.set_strong_side(room_id, second_pick_team)
+                await db.update_room_status(room_id, "picking")
+                await self._refresh_lobby()
+                cap1 = next((p for p in caps if p["team"] == 1), None)
+                cap2 = next((p for p in caps if p["team"] == 2), None)
+                first_cap = cap1 if first_pick_team == 1 else cap2
+                second_cap = cap2 if first_pick_team == 1 else cap1
+                if room_channel:
+                    strong_side = "🔵 Команда 1" if second_pick_team == 1 else "🔴 Команда 2"
+                    strong_embed = discord.Embed(
+                        title="🎯 Капитанский пик начался!",
+                        description=(
+                            f"👑 Капитан команды 1: <@{cap1['discord_id']}>\n"
+                            f"👑 Капитан команды 2: <@{cap2['discord_id']}>\n\n"
+                            f"**Первым пикует: <@{first_cap['discord_id']}>** (Команда {first_pick_team})\n\n"
+                            f"⚔️ **Сильная сторона: {strong_side}** (пикует вторым — <@{second_cap['discord_id']}>)"
+                        ),
+                        color=0xE67E22,
+                    )
+                    await room_channel.send(embed=strong_embed)
+                    await self._send_pick_message(room_id, room_channel, first_pick_team)
+                await self._refresh_room_embed(room_id)
+                return
+            # unpicked пуст — пик завершён, все в командах, запускаем игру (продолжаем выполнение)
+
 
         # ── team / random режим: проверяем команды и запускаем игру ─
         team1 = [p for p in players if p["team"] == 1]
         team2 = [p for p in players if p["team"] == 2]
 
         if len(team1) < size or len(team2) < size:
-            if hasattr(channel, "send"):
-                await channel.send("Обе команды должны быть полностью заполнены.")
+            if hasattr(reply_channel, "send"):
+                await reply_channel.send("Обе команды должны быть полностью заполнены.")
             return
 
         # В team-режиме старт может нажать любой игрок; в random — только капитан
         if room["mode"] != "team" and not me["is_captain"]:
-            if hasattr(channel, "send"):
-                await channel.send("Только капитаны могут запустить игру.")
+            if hasattr(reply_channel, "send"):
+                await reply_channel.send("Только капитаны могут запустить игру.")
             return
 
         await db.update_room_status(room_id, "started")
         await self._refresh_lobby()
 
-        guild = self.bot.get_guild(Config.GUILD_ID)
-        room_channel = guild.get_channel(room["channel_id"]) if guild else None
         if room_channel:
             # Объявляем сильную сторону сразу при старте
             strong = random.choice(["🔵 Команда 1 / Team 1", "🔴 Команда 2 / Team 2"])
