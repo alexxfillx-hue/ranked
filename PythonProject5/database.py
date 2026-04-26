@@ -133,6 +133,9 @@ class Database:
             await conn.execute(
                 "ALTER TABLE elo_history ADD COLUMN IF NOT EXISTS size INTEGER"
             )
+            await conn.execute(
+                "ALTER TABLE elo_history ADD COLUMN IF NOT EXISTS result TEXT"
+            )
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -231,9 +234,9 @@ class Database:
                     )
                 await conn.execute(
                     """INSERT INTO elo_history
-                       (discord_id, elo_before, elo_after, change, game_id, mode, size)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7)""",
-                    discord_id, elo_before, new_elo, new_elo - elo_before, game_id, mode, size,
+                       (discord_id, elo_before, elo_after, change, game_id, mode, size, result)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                    discord_id, elo_before, new_elo, new_elo - elo_before, game_id, mode, size, result,
                 )
 
     async def apply_penalty(self, discord_id: int):
