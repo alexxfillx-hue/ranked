@@ -136,35 +136,12 @@ class Database:
             await conn.execute(
                 "ALTER TABLE elo_history ADD COLUMN IF NOT EXISTS result TEXT"
             )
-            # Миграция: заполняем result для старых записей где он NULL
-            # 1. Берём result из таблицы game_results по совпадению game_id + discord_id
-            await conn.execute(
-                """UPDATE elo_history eh
-                   SET result = gr.result
-                   FROM game_results gr
-                   WHERE eh.result IS NULL
-                     AND eh.game_id IS NOT NULL
-                     AND gr.game_id = eh.game_id
-                     AND gr.discord_id = eh.discord_id"""
-            )
-            # 2. Оставшиеся NULL с change > 0 → win
+            # Миграция: все старые записи без result.
+            # Ничей не было — change=0 это поражение при ELO=0 (дельта обнулялась ботом).
             await conn.execute(
                 """UPDATE elo_history
-                   SET result = 'win'
-                   WHERE result IS NULL AND game_id IS NOT NULL AND change > 0"""
-            )
-            # 3. Оставшиеся NULL с change < 0 → lose
-            await conn.execute(
-                """UPDATE elo_history
-                   SET result = 'lose'
-                   WHERE result IS NULL AND game_id IS NOT NULL AND change < 0"""
-            )
-            # 4. Оставшиеся NULL с change = 0 → lose
-            #    (были поражениями при ELO=0, бот обнулял дельту)
-            await conn.execute(
-                """UPDATE elo_history
-                   SET result = 'lose'
-                   WHERE result IS NULL AND game_id IS NOT NULL AND change = 0"""
+                   SET result = CASE WHEN change > 0 THEN 'win' ELSE 'lose' END
+                   WHERE result IS NULL"""
             )
 
     @property
