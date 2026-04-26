@@ -259,7 +259,10 @@ class Leaderboard(commands.Cog):
 
     @commands.command(name="streak")
     async def streak(self, ctx: commands.Context, member: discord.Member = None):
-        """История результатов игр: 🟢 победа, 🔴 поражение, 🟡 ничья"""
+        """
+        История результатов игр с форматом и изменением ELO.
+        Включает ВСЕ игры — в том числе сыгранные до обновления бота.
+        """
         if not self._is_guild(ctx):
             return
 
@@ -270,37 +273,93 @@ class Leaderboard(commands.Cog):
             return
 
         history = await self.bot.db.get_elo_history_simple(target.id)
-        if not history:
+        # Фильтруем: только записи от реальных игр (game_id не NULL; change != 0 или mode задан)
+        # Записи от mod_adjust_elo (game_id=NULL) тоже оставляем, они нужны для ELO графика
+        # но для streak берём только игровые (game_id IS NOT NULL)
+        game_history = [r for r in history if r.get("game_id") is not None]
+        if not game_history:
             await ctx.send(f"У **{player['username']}** пока нет сыгранных игр.")
             return
 
-        emoji_map = {"win": "🟢", "lose": "🔴", "draw": "🟡"}
-        # Показываем последние 50 игр (справа — самые свежие)
-        icons = [emoji_map.get(r["result"], "⬜") for r in history[-50:]]
+        # Последние 30 игр для детального списка
+        recent = game_history[-30:]
+
+        # Определяем результат по знаку change (для старых записей без поля result)
+        def get_result(row) -> str:
+            ch = row.get("change", 0)
+            if ch > 0:
+                return "win"
+            elif ch < 0:
+                return "lose"
+            return "draw"
+
+        # Строка-иконки: последние 50 игр
+        icon_map = {"win": "🟢", "lose": "🔴", "draw": "🟡"}
+        icons = [icon_map[get_result(r)] for r in game_history[-50:]]
         streak_line = "".join(icons)
 
-        # Считаем текущую серию
-        current = history[-1]["result"]
-        count = 0
-        for r in reversed(history):
-            if r["result"] == current:
-                count += 1
+        # Текущая серия
+        current_result = get_result(game_history[-1])
+        streak_count = 0
+        for r in reversed(game_history):
+            if get_result(r) == current_result:
+                streak_count += 1
             else:
                 break
-        streak_label = {"win": f"🔥 {count} побед подряд", "lose": f"❄️ {count} поражений подряд", "draw": f"🤝 {count} ничьих подряд"}.get(current, "")
+        streak_labels = {
+            "win":  f"🔥 {streak_count} побед подряд",
+            "lose": f"❄️ {streak_count} поражений подряд",
+            "draw": f"🤝 {streak_count} ничьих подряд",
+        }
+        streak_label = streak_labels[current_result]
 
-        total = len(history)
-        wins = sum(1 for r in history if r["result"] == "win")
-        losses = sum(1 for r in history if r["result"] == "lose")
+        # Детальный список последних 30 игр
+        mode_labels = {
+            "team":   "👥 team",
+            "random": "🎲 rand",
+            "cap":    "🎯 cap",
+            None:     "❓",
+        }
+        detail_lines = []
+        for r in reversed(recent):
+            res = get_result(r)
+            icon = icon_map[res]
+            ch = r.get("change", 0)
+            sign = "+" if ch >= 0 else ""
+            elo_str = f"{sign}{ch}" if ch != 0 else "±0"
+            size = r.get("size")
+            mode = r.get("mode")
+            mode_label = mode_labels.get(mode, "❓")
+            fmt = f"{size}v{size}" if size else "?v?"
+            elo_after = r.get("elo_after", "?")
+            detail_lines.append(
+                f"{icon} `{fmt} {mode_label}` {elo_str} ELO → **{elo_after}**"
+            )
+
+        # Discord embed field value max 1024 chars — делаем страницами по 15
+        total = len(game_history)
+        wins = sum(1 for r in game_history if get_result(r) == "win")
+        losses = sum(1 for r in game_history if get_result(r) == "lose")
+        draws = total - wins - losses
+        wr = round(wins / total * 100) if total else 0
 
         embed = discord.Embed(
             title=f"📊  История игр — {player['username']}",
             color=0x5865F2,
         )
-        embed.add_field(name="Последние игры (🟢 победа  🔴 поражение  🟡 ничья)", value=streak_line or "—", inline=False)
+        embed.add_field(
+            name=f"Последние {min(50, total)} игр  (🟢 победа  🔴 поражение  🟡 ничья)",
+            value=streak_line or "—",
+            inline=False,
+        )
+        # Детали: режем по 15 записей чтобы не превысить лимит поля
+        chunk = "\n".join(detail_lines[:15])
+        embed.add_field(name="Последние игры (детально)", value=chunk or "—", inline=False)
+
         embed.add_field(name="Текущая серия", value=streak_label, inline=True)
-        embed.add_field(name="Всего игр", value=str(total), inline=True)
-        embed.add_field(name="В/П", value=f"{wins}/{losses}", inline=True)
+        embed.add_field(name="Всего игр",     value=str(total),   inline=True)
+        embed.add_field(name="В / П / Н",     value=f"{wins} / {losses} / {draws}", inline=True)
+        embed.add_field(name="Винрейт",        value=f"{wr}%",    inline=True)
         await ctx.send(embed=embed)
 
     @commands.command(name="stat")
