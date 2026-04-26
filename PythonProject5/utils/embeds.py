@@ -122,16 +122,20 @@ def room_embed(room_id: int, size: int, players, mode: str = "team") -> discord.
         embed.set_footer(text=f"Игроков: {total}/{total_slots}")
         return embed
 
-    # ── Режим team (по умолчанию) ─────────────────────────────────
-    def build_team(team, cap_ready, sz):
-        lines = [player_line(p) for p in team]
+    # ── Режим team (по умолчанию) — без капитанов ────────────────
+    def player_line_team(p):
+        rank, _ = get_rank(p["elo"])
+        return f"• **{p['username']}** — {p['elo']} ({rank})"
+
+    def build_team(team, sz):
+        lines = [player_line_team(p) for p in team]
         free = sz - len(team)
         lines += ["• *Свободное место*"] * free
         status = "✅ Сформирована" if (len(team) == sz) else "⏳ Набор"
         return "\n".join(lines), status
 
-    t1_text, t1_status = build_team(team1, ready1, size)
-    t2_text, t2_status = build_team(team2, ready2, size)
+    t1_text, t1_status = build_team(team1, size)
+    t2_text, t2_status = build_team(team2, size)
 
     total = len(players)
     color = 0x5865F2
@@ -140,7 +144,10 @@ def room_embed(room_id: int, size: int, players, mode: str = "team") -> discord.
         title=f"🎮  Комната **#{room_id}**  ·  {size}v{size}  ·  👥 Командный",
         color=color,
     )
-    embed.description = "Используй `!pick 1` или `!pick 2` чтобы выбрать команду."
+    embed.description = (
+        "Используй `!pick 1` или `!pick 2` (или кнопки) чтобы выбрать команду.\n"
+        "Можно менять команду в любой момент до старта!"
+    )
     embed.add_field(name=f"🔵 Команда 1  |  {t1_status}", value=t1_text, inline=True)
     embed.add_field(name=f"🔴 Команда 2  |  {t2_status}", value=t2_text, inline=True)
     embed.set_footer(text=f"Игроков: {total}/{size * 2}")
