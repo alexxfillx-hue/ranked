@@ -125,11 +125,15 @@ class Register(commands.Cog):
                         await member.add_roles(role, reason=f"ELO {elo} → {rank_name}")
                     except discord.Forbidden:
                         pass
+                    except discord.HTTPException:
+                        pass
             else:
                 if role in member.roles:
                     try:
                         await member.remove_roles(role, reason="ELO rank update")
                     except discord.Forbidden:
+                        pass
+                    except discord.HTTPException:
                         pass
 
     async def _get_lang(self, discord_id: int) -> str:
@@ -209,7 +213,43 @@ class Register(commands.Cog):
         msg = await ctx.send(embed=embed, view=view)
         self._pending_registration[ctx.author.id] = msg.id
 
-    @commands.command(name="rename")
+    @commands.command(name="debug_roles")
+    @commands.has_permissions(administrator=True)
+    async def debug_roles(self, ctx: commands.Context):
+        """[Админ] Проверить существуют ли ранговые роли на сервере."""
+        if not self._guild_check(ctx):
+            return
+        lines = []
+        for _, _, name, _, role_name in RANKS:
+            role = discord.utils.get(ctx.guild.roles, name=role_name)
+            status = f"✅ найдена (id:{role.id})" if role else "❌ НЕ НАЙДЕНА"
+            lines.append(f"`{role_name}` — {status}")
+        embed = discord.Embed(title="🔍 Диагностика ранговых ролей", description="\n".join(lines), color=0x5865F2)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="fix_role")
+    async def fix_role(self, ctx: commands.Context, member: discord.Member = None):
+        """Принудительно выдать ранговую роль себе или указанному игроку."""
+        if not self._guild_check(ctx):
+            return
+        target = member or ctx.author
+        # Только модератор может фиксить чужую роль
+        if target != ctx.author and not (
+            ctx.author.guild_permissions.administrator or
+            discord.utils.get(ctx.author.roles, name=Config.MODERATOR_ROLE_NAME)
+        ):
+            await ctx.send("❌ Нет прав.")
+            return
+        player = await self.bot.db.get_player(target.id)
+        if not player:
+            await ctx.send("❌ Игрок не зарегистрирован.")
+            return
+        await self._sync_rank_role(target, player["elo"])
+        from config import get_rank
+        rank_name, _ = get_rank(player["elo"])
+        await ctx.send(f"✅ Роль **{rank_name}** выдана для {target.mention} (ELO: {player['elo']})")
+
+
     async def rename(self, ctx: commands.Context, *, new_nick: str = None):
         if not self._guild_check(ctx):
             return

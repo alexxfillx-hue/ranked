@@ -284,8 +284,12 @@ class Leaderboard(commands.Cog):
         # Последние 30 игр для детального списка
         recent = game_history[-30:]
 
-        # Определяем результат по знаку change (для старых записей без поля result)
+        # Определяем результат: сначала из поля result (новые записи), fallback — по знаку change
         def get_result(row) -> str:
+            stored = row.get("result")
+            if stored in ("win", "lose", "draw"):
+                return stored
+            # Старые записи без поля result — определяем по знаку change
             ch = row.get("change", 0)
             if ch > 0:
                 return "win"

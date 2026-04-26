@@ -2062,7 +2062,7 @@ class Rooms(commands.Cog):
             new_elo = max(0, pl["elo"] + delta)
             elo_changes[p["discord_id"]] = (pl["elo"], new_elo, delta, result)
 
-            await db.update_after_game(p["discord_id"], new_elo, result, room_id)
+            await db.update_after_game(p["discord_id"], new_elo, result, room_id, mode=room["mode"], size=room["size"])
 
             if member := guild.get_member(p["discord_id"]):
                 if reg_cog:
