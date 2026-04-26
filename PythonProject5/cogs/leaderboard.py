@@ -171,6 +171,7 @@ class Leaderboard(commands.Cog):
         await ctx.send(f"✅ **{member.display_name}** -{amount} ELO → **{new_elo}** ELO")
 
 
+    @commands.command(name="rules")
     async def rules(self, ctx: commands.Context):
         if not self._is_guild(ctx):
             return
@@ -254,6 +255,106 @@ class Leaderboard(commands.Cog):
         embed.set_footer(text="Удачи! / Good luck! 🎮")
         await ctx.send(embed=embed)
 
+
+
+    @commands.command(name="streak")
+    async def streak(self, ctx: commands.Context, member: discord.Member = None):
+        """История результатов игр: 🟢 победа, 🔴 поражение, 🟡 ничья"""
+        if not self._is_guild(ctx):
+            return
+
+        target = member or ctx.author
+        player = await self.bot.db.get_player(target.id)
+        if not player:
+            await ctx.send(f"{target.mention} не зарегистрирован.")
+            return
+
+        history = await self.bot.db.get_elo_history_simple(target.id)
+        if not history:
+            await ctx.send(f"У **{player['username']}** пока нет сыгранных игр.")
+            return
+
+        emoji_map = {"win": "🟢", "lose": "🔴", "draw": "🟡"}
+        # Показываем последние 50 игр (справа — самые свежие)
+        icons = [emoji_map.get(r["result"], "⬜") for r in history[-50:]]
+        streak_line = "".join(icons)
+
+        # Считаем текущую серию
+        current = history[-1]["result"]
+        count = 0
+        for r in reversed(history):
+            if r["result"] == current:
+                count += 1
+            else:
+                break
+        streak_label = {"win": f"🔥 {count} побед подряд", "lose": f"❄️ {count} поражений подряд", "draw": f"🤝 {count} ничьих подряд"}.get(current, "")
+
+        total = len(history)
+        wins = sum(1 for r in history if r["result"] == "win")
+        losses = sum(1 for r in history if r["result"] == "lose")
+
+        embed = discord.Embed(
+            title=f"📊  История игр — {player['username']}",
+            color=0x5865F2,
+        )
+        embed.add_field(name="Последние игры (🟢 победа  🔴 поражение  🟡 ничья)", value=streak_line or "—", inline=False)
+        embed.add_field(name="Текущая серия", value=streak_label, inline=True)
+        embed.add_field(name="Всего игр", value=str(total), inline=True)
+        embed.add_field(name="В/П", value=f"{wins}/{losses}", inline=True)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="stat")
+    async def stat(self, ctx: commands.Context, member: discord.Member = None):
+        """Статистика против конкретных игроков: с кем больше побед/поражений"""
+        if not self._is_guild(ctx):
+            return
+
+        target = member or ctx.author
+        player = await self.bot.db.get_player(target.id)
+        if not player:
+            await ctx.send(f"{target.mention} не зарегистрирован.")
+            return
+
+        rows = await self.bot.db.get_stat_vs_players(target.id)
+        if not rows:
+            await ctx.send(f"У **{player['username']}** пока нет статистики против других игроков.")
+            return
+
+        embed = discord.Embed(
+            title=f"⚔️  Статистика — {player['username']}",
+            color=0xE67E22,
+        )
+
+        # Топ-5 по победам
+        top_wins = [r for r in rows if r["wins"] > 0][:5]
+        if top_wins:
+            lines = []
+            for r in top_wins:
+                wr = round(r["wins"] / r["total"] * 100) if r["total"] else 0
+                lines.append(f"• **{r['username']}** — {r['wins']}В / {r['losses']}П / {r['draws']}Н  (WR {wr}%)")
+            embed.add_field(name="🏆 Больше всего побед против", value="\n".join(lines), inline=False)
+
+        # Топ-5 по поражениям
+        top_losses = sorted(rows, key=lambda r: r["losses"], reverse=True)
+        top_losses = [r for r in top_losses if r["losses"] > 0][:5]
+        if top_losses:
+            lines = []
+            for r in top_losses:
+                wr = round(r["wins"] / r["total"] * 100) if r["total"] else 0
+                lines.append(f"• **{r['username']}** — {r['wins']}В / {r['losses']}П / {r['draws']}Н  (WR {wr}%)")
+            embed.add_field(name="💀 Больше всего поражений против", value="\n".join(lines), inline=False)
+
+        # Лучший напарник (общие победы в одной команде — пока считаем через wins где были в одном game_id)
+        # Топ по общему числу игр
+        top_played = sorted(rows, key=lambda r: r["total"], reverse=True)[:3]
+        if top_played:
+            lines = []
+            for r in top_played:
+                lines.append(f"• **{r['username']}** — {r['total']} игр вместе")
+            embed.add_field(name="🎮 Чаще всего встречался с", value="\n".join(lines), inline=False)
+
+        embed.set_footer(text=f"Всего уникальных соперников: {len(rows)}")
+        await ctx.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Leaderboard(bot))

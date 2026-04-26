@@ -2024,6 +2024,13 @@ class Rooms(commands.Cog):
                     format_size=room["size"],
                     result=result,
                 )
+                # В режиме team игроки собирают свои постоянные составы — это проще,
+                # поэтому ELO за такие игры снижается на 30%
+                if room["mode"] == "team":
+                    if delta > 0:
+                        delta = max(1, int(delta * 0.7))
+                    elif delta < 0:
+                        delta = min(-1, int(delta * 0.7))
 
             if pl["penalty_games"] > 0:
                 if result == "win":
@@ -2042,6 +2049,11 @@ class Rooms(commands.Cog):
             if member := guild.get_member(p["discord_id"]):
                 if reg_cog:
                     await reg_cog._sync_rank_role(member, new_elo)
+
+        # Сохраняем результаты матча для !streak и !stat
+        # result для save_game_results — результат команды 1
+        t1_result = "draw" if v1 == "draw" else ("win" if v1 == "win" else "lose")
+        await db.save_game_results(room_id, team1, team2, t1_result)
 
         channel = guild.get_channel(room["channel_id"])
         if channel:
