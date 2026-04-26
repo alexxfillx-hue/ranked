@@ -193,12 +193,15 @@ class JoinButton(discord.ui.Button):
             await interaction.response.send_message("❌ Комната уже полная.", ephemeral=True)
             return
 
+        # Откладываем ответ немедленно — все дальнейшие операции займут > 3 сек
+        await interaction.response.defer(ephemeral=True)
+
         bot = interaction.client
         db = bot.db
 
         player = await db.get_player(interaction.user.id)
         if not player:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Ты не зарегистрирован. Используй `!register <ник>`.",
                 ephemeral=True,
             )
@@ -206,7 +209,7 @@ class JoinButton(discord.ui.Button):
 
         existing = await db.get_player_room(interaction.user.id)
         if existing:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Ты уже в комнате. Выйди через кнопку **Покинуть** или `!exit`.",
                 ephemeral=True,
             )
@@ -214,14 +217,14 @@ class JoinButton(discord.ui.Button):
 
         room = await db.get_room(self.room_id)
         if not room or room["status"] not in ("waiting", "picking"):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Эта комната больше недоступна.", ephemeral=True
             )
             return
 
         players = await db.get_room_players(self.room_id)
         if len(players) >= self.size * 2:
-            await interaction.response.send_message("❌ Комната уже заполнена.", ephemeral=True)
+            await interaction.followup.send("❌ Комната уже заполнена.", ephemeral=True)
             return
 
         # Определяем команду
@@ -234,8 +237,6 @@ class JoinButton(discord.ui.Button):
             team = 1 if len(team1) < self.size else 2
 
         await db.add_to_room(self.room_id, interaction.user.id, team=team)
-
-        # В режиме team — капитанов нет, все игроки равны
 
         guild = interaction.guild
         rooms_cog = bot.cogs.get("Rooms")
@@ -265,7 +266,7 @@ class JoinButton(discord.ui.Button):
             await rooms_cog._refresh_room_embed(self.room_id)
             await rooms_cog._refresh_lobby()
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Ты в комнате **#{self.room_id}**! Перейди в {channel.mention if channel else 'канал комнаты'}.",
             ephemeral=True,
         )
@@ -1317,14 +1318,16 @@ class Rooms(commands.Cog):
 
         first_pick_team = random.choice([1, 2])
         await db.set_pick_turn(room_id, first_pick_team)
+        # Сильная сторона — тот кто пикует ВТОРЫМ
+        second_pick_team_r = 2 if first_pick_team == 1 else 1
+        await db.set_strong_side(room_id, second_pick_team_r)
         await db.update_room_status(room_id, "picking")
         await self._refresh_lobby()
 
         if channel:
             first_cap = cap1 if first_pick_team == 1 else cap2
-            second_pick_team = 2 if first_pick_team == 1 else 1
             second_cap = cap2 if first_pick_team == 1 else cap1
-            strong_side = "🔵 Команда 1" if second_pick_team == 1 else "🔴 Команда 2"
+            strong_side = "🔵 Команда 1" if second_pick_team_r == 1 else "🔴 Команда 2"
             embed = discord.Embed(
                 title="🎯 Капитанский пик начался!",
                 description=(
@@ -1975,6 +1978,8 @@ class Rooms(commands.Cog):
             first_pick_team = random.choice([1, 2])
             second_pick_team = 2 if first_pick_team == 1 else 1
             await db.set_pick_turn(room_id, first_pick_team)
+            # Сильная сторона — тот кто пикует ВТОРЫМ (компенсация за выбор последним)
+            await db.set_strong_side(room_id, second_pick_team)
             await db.update_room_status(room_id, "picking")
             await self._refresh_lobby()
             cap1 = next((p for p in caps if p["team"] == 1), None)

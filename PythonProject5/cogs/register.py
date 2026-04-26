@@ -21,18 +21,18 @@ class LangButton(discord.ui.Button):
         self.nickname = nickname
 
     async def callback(self, interaction: discord.Interaction):
+        # Откладываем ответ сразу — операции с БД, ролями и ником занимают > 3 сек
+        await interaction.response.defer(ephemeral=False)
+
         db = interaction.client.db
         lang = self.lang
 
         # Получаем nickname: либо из self (свежая кнопка), либо из embed (после рестарта бота).
-        # После рестарта LangSelectView создаётся с nickname="_restore_",
-        # поэтому читаем реальный ник из embed сообщения.
         nickname = self.nickname
         if nickname == "_restore_":
             try:
                 embeds = interaction.message.embeds
                 if embeds and embeds[0].description:
-                    # Описание содержит строку "Ник / Nickname: **alekz**"
                     import re
                     match = re.search(r"\*\*(.+?)\*\*", embeds[0].description)
                     if match:
@@ -41,7 +41,7 @@ class LangButton(discord.ui.Button):
                 pass
 
         if not nickname or nickname == "_restore_":
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="⚠️ Не удалось определить ник. Напиши `!register <ник>` заново.",
                 embed=None, view=None,
             )
@@ -54,7 +54,7 @@ class LangButton(discord.ui.Button):
 
         existing = await db.get_player(interaction.user.id)
         if existing:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=t("register_already", lang, username=existing["username"], elo=existing["elo"]),
                 embed=None, view=None,
             )
@@ -62,7 +62,7 @@ class LangButton(discord.ui.Button):
 
         taken = await db.get_player_by_username(nickname)
         if taken:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=t("register_nick_taken", lang, nick=nickname),
                 embed=None, view=None,
             )
@@ -71,29 +71,38 @@ class LangButton(discord.ui.Button):
         ok = await db.register(interaction.user.id, nickname)
         if ok:
             await db.set_lang(interaction.user.id, lang)
-            # Получаем Member (не просто User) для edit() и sync_rank_role()
-            guild = interaction.guild
-            member = guild.get_member(interaction.user.id) if guild else None
-            if member is None:
-                member = interaction.user
-            try:
-                await member.edit(nick=nickname, reason="Регистрация в боте")
-            except (discord.Forbidden, AttributeError):
-                pass
 
-            if reg_cog and guild:
-                m = guild.get_member(interaction.user.id)
-                if m:
-                    await reg_cog._sync_rank_role(m, Config.STARTING_ELO)
+            guild = interaction.guild
+            member = None
+            if guild:
+                # fetch_member гарантирует актуальные данные даже без кэша
+                try:
+                    member = await guild.fetch_member(interaction.user.id)
+                except (discord.NotFound, discord.HTTPException):
+                    member = None
+
+            # Меняем ник на сервере
+            if member:
+                try:
+                    await member.edit(nick=nickname, reason="Регистрация в боте")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass  # нет прав — не критично
+
+            # Выдаём ранговую роль (Bronze I при ELO = 0)
+            if reg_cog and member:
+                try:
+                    await reg_cog._sync_rank_role(member, Config.STARTING_ELO)
+                except Exception:
+                    pass
 
             embed = discord.Embed(
                 title=t("register_ok_title", lang),
                 description=t("register_ok_desc", lang, nick=nickname),
                 color=0x57F287,
             )
-            await interaction.response.edit_message(embed=embed, view=None, content=None)
+            await interaction.edit_original_response(embed=embed, view=None, content=None)
         else:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=t("register_error", lang), embed=None, view=None,
             )
 
