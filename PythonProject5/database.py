@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS rooms (
     created_by       BIGINT  NOT NULL,
     embed_message_id BIGINT,
     pick_turn        INTEGER DEFAULT 1,
+    strong_side      INTEGER DEFAULT 0,
     started_at       TIMESTAMP,
     pinged_at        TIMESTAMP,
     created_at       TIMESTAMP DEFAULT NOW(),
@@ -135,6 +136,9 @@ class Database:
             )
             await conn.execute(
                 "ALTER TABLE elo_history ADD COLUMN IF NOT EXISTS result TEXT"
+            )
+            await conn.execute(
+                "ALTER TABLE rooms ADD COLUMN IF NOT EXISTS strong_side INTEGER DEFAULT 0"
             )
             # Миграция: все старые записи без result.
             # Ничей не было — change=0 это поражение при ELO=0 (дельта обнулялась ботом).
@@ -351,6 +355,11 @@ class Database:
     async def set_pick_turn(self, room_id: int, turn: int):
         await self.pool.execute(
             "UPDATE rooms SET pick_turn=$1 WHERE room_id=$2", turn, room_id
+        )
+
+    async def set_strong_side(self, room_id: int, team: int):
+        await self.pool.execute(
+            "UPDATE rooms SET strong_side=$1 WHERE room_id=$2", team, room_id
         )
 
     async def set_ready(self, room_id: int, team: int, value: bool):
