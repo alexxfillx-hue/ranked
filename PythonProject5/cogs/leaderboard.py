@@ -284,21 +284,20 @@ class Leaderboard(commands.Cog):
         # Последние 30 игр для детального списка
         recent = game_history[-30:]
 
-        # Определяем результат: сначала из поля result (новые записи), fallback — по знаку change
+        # Ничьих нет — change=0 всегда поражение (ELO не двигается).
+        # Используем поле result если есть, иначе определяем по знаку change.
         def get_result(row) -> str:
             stored = row.get("result")
-            if stored in ("win", "lose", "draw"):
-                return stored
-            # Старые записи без поля result — определяем по знаку change
-            ch = row.get("change", 0)
-            if ch > 0:
+            if stored == "win":
                 return "win"
-            elif ch < 0:
+            if stored in ("lose", "draw"):
+                # draw трактуем как lose — ничьих не было
                 return "lose"
-            return "draw"
+            # Старые записи без result
+            return "win" if row.get("change", 0) > 0 else "lose"
 
-        # Строка-иконки: последние 50 игр
-        icon_map = {"win": "🟢", "lose": "🔴", "draw": "🟡"}
+        # Строка-иконки: последние 50 игр (только победа / поражение)
+        icon_map = {"win": "🟢", "lose": "🔴"}
         icons = [icon_map[get_result(r)] for r in game_history[-50:]]
         streak_line = "".join(icons)
 
@@ -313,7 +312,6 @@ class Leaderboard(commands.Cog):
         streak_labels = {
             "win":  f"🔥 {streak_count} побед подряд",
             "lose": f"❄️ {streak_count} поражений подряд",
-            "draw": f"🤝 {streak_count} ничьих подряд",
         }
         streak_label = streak_labels[current_result]
 
@@ -329,8 +327,8 @@ class Leaderboard(commands.Cog):
             res = get_result(r)
             icon = icon_map[res]
             ch = r.get("change", 0)
-            sign = "+" if ch >= 0 else ""
-            elo_str = f"{sign}{ch}" if ch != 0 else "±0"
+            sign = "+" if ch > 0 else ""
+            elo_str = f"{sign}{ch}" if ch != 0 else "-0"
             size = r.get("size")
             mode = r.get("mode")
             mode_label = mode_labels.get(mode, "❓")
@@ -340,11 +338,10 @@ class Leaderboard(commands.Cog):
                 f"{icon} `{fmt} {mode_label}` {elo_str} ELO → **{elo_after}**"
             )
 
-        # Discord embed field value max 1024 chars — делаем страницами по 15
+        # Discord embed field value max 1024 chars — режем по 15
         total = len(game_history)
         wins = sum(1 for r in game_history if get_result(r) == "win")
-        losses = sum(1 for r in game_history if get_result(r) == "lose")
-        draws = total - wins - losses
+        losses = total - wins
         wr = round(wins / total * 100) if total else 0
 
         embed = discord.Embed(
@@ -352,17 +349,16 @@ class Leaderboard(commands.Cog):
             color=0x5865F2,
         )
         embed.add_field(
-            name=f"Последние {min(50, total)} игр  (🟢 победа  🔴 поражение  🟡 ничья)",
+            name=f"Последние {min(50, total)} игр  (🟢 победа  🔴 поражение)",
             value=streak_line or "—",
             inline=False,
         )
-        # Детали: режем по 15 записей чтобы не превысить лимит поля
         chunk = "\n".join(detail_lines[:15])
         embed.add_field(name="Последние игры (детально)", value=chunk or "—", inline=False)
 
         embed.add_field(name="Текущая серия", value=streak_label, inline=True)
         embed.add_field(name="Всего игр",     value=str(total),   inline=True)
-        embed.add_field(name="В / П / Н",     value=f"{wins} / {losses} / {draws}", inline=True)
+        embed.add_field(name="В / П",          value=f"{wins} / {losses}", inline=True)
         embed.add_field(name="Винрейт",        value=f"{wr}%",    inline=True)
         await ctx.send(embed=embed)
 
