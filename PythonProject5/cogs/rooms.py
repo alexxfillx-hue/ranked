@@ -282,6 +282,158 @@ class JoinRoomView(discord.ui.View):
 
 # ── RoomView ──────────────────────────────────────────────────────
 
+class ExitConfirmView(discord.ui.View):
+    """Предупреждение о штрафе за выход из активной игры."""
+
+    def __init__(self, room_id: int):
+        super().__init__(timeout=30)
+        self.room_id = room_id
+
+    @discord.ui.button(label="✅ Подтвердить выход", style=discord.ButtonStyle.danger, custom_id="exit_confirm_yes")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        await _do_exit(interaction, self.room_id)
+        self.stop()
+
+    @discord.ui.button(label="❌ Отмена", style=discord.ButtonStyle.secondary, custom_id="exit_confirm_no")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="✅ Отменено. Ты остаёшься в игре.",
+            embed=None,
+            view=None,
+        )
+        self.stop()
+
+    @discord.ui.button(label="🚨 Вызвать админа", style=discord.ButtonStyle.primary, custom_id="exit_confirm_admin")
+    async def call_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bot = interaction.client
+        db = bot.db
+        room = await db.get_player_room(interaction.user.id)
+        guild = interaction.guild
+        admin_channel = discord.utils.find(
+            lambda c: Config.ADMIN_CHANNEL_NAME in c.name or c.name == Config.ADMIN_CHANNEL_NAME,
+            guild.text_channels,
+        )
+        if admin_channel:
+            mod_role = discord.utils.get(guild.roles, name=Config.MODERATOR_ROLE_NAME)
+            mention = mod_role.mention if mod_role else "@Модератор"
+            embed = discord.Embed(title="🚨 Вызов администрации из комнаты", color=0xED4245)
+            embed.add_field(
+                name="Комната",
+                value=f"**#{self.room_id}** {interaction.channel.mention}",
+                inline=True,
+            )
+            embed.add_field(
+                name="Вызвал",
+                value=f"{interaction.user.mention} (`{interaction.user}`)",
+                inline=True,
+            )
+            embed.add_field(
+                name="Причина",
+                value="Игрок хочет покинуть игру и запросил помощь администратора.",
+                inline=False,
+            )
+            await admin_channel.send(f"{mention}", embed=embed)
+        await interaction.response.edit_message(
+            content="✅ Администрация уведомлена. Модератор скоро придёт. Ты остаёшься в игре.",
+            embed=None,
+            view=None,
+        )
+        self.stop()
+
+    async def on_timeout(self):
+        # View истёк — ничего не делаем (сообщение просто останется)
+        pass
+
+
+async def _do_exit(interaction: discord.Interaction, room_id: int):
+    """Фактическое выполнение выхода игрока из комнаты."""
+    bot = interaction.client
+    db = bot.db
+    room = await db.get_player_room(interaction.user.id)
+    if not room or room["room_id"] != room_id:
+        await interaction.edit_original_response(content="Ты не в этой комнате.", embed=None, view=None)
+        return
+
+    players = await db.get_room_players(room_id)
+    me = next((p for p in players if p["discord_id"] == interaction.user.id), None)
+    was_captain = bool(me and me["is_captain"])
+    my_team = me["team"] if me else None
+
+    game_was_started = room["status"] == "started"
+
+    await db.remove_from_room(room_id, interaction.user.id)
+
+    guild = interaction.guild
+    rooms_cog = bot.cogs.get("Rooms")
+    channel = guild.get_channel(room["channel_id"]) if guild else None
+
+    if channel and rooms_cog:
+        await rooms_cog._deny_channel(channel, interaction.user)
+
+    # Штраф за выход во время игры
+    if game_was_started:
+        new_elo = await db.deduct_elo_for_leave(interaction.user.id, 15)
+        if channel:
+            await channel.send(
+                f"⚠️ {interaction.user.mention} покинул игру и получает штраф **-15 ELO** "
+                f"(теперь {new_elo} ELO). Игра отменена, комната возобновляет набор игроков."
+            )
+        # Обновляем ранговую роль
+        from cogs.register import Register
+        reg_cog: Register = bot.cogs.get("Register")  # type: ignore
+        if reg_cog and guild:
+            member = guild.get_member(interaction.user.id)
+            if member:
+                await reg_cog._sync_rank_role(member, new_elo)
+    else:
+        if channel:
+            await channel.send(f"👋 {interaction.user.mention} покинул комнату.")
+
+    players = await db.get_room_players(room_id)
+
+    if not players:
+        await interaction.edit_original_response(
+            content="✅ Ты покинул комнату. Она удалена (все ушли).",
+            embed=None, view=None,
+        )
+        if channel:
+            await channel.delete(reason="Комната пуста")
+        await db.delete_room(room_id)
+        if rooms_cog:
+            await rooms_cog._refresh_lobby()
+        return
+
+    if was_captain and my_team and rooms_cog:
+        team_left = [p for p in players if p["team"] == my_team]
+        if team_left:
+            new_cap = max(team_left, key=lambda p: p["elo"])
+            await db.set_captain(room_id, new_cap["discord_id"], True)
+            if channel:
+                m = guild.get_member(new_cap["discord_id"])
+                if m:
+                    await channel.send(f"👑 {m.mention} назначен новым капитаном команды {my_team}.")
+
+    # Сброс статуса в waiting (и при старте, и при full/picking)
+    if room["status"] in ("full", "picking", "started"):
+        await db.update_room_status(room_id, "waiting")
+        await db.set_ready(room_id, 1, False)
+        await db.set_ready(room_id, 2, False)
+        # Сбрасываем end_vote всем игрокам комнаты
+        for p in players:
+            await db.set_end_vote(room_id, p["discord_id"], None)
+
+    if rooms_cog:
+        await rooms_cog._refresh_room_embed(room_id)
+        await rooms_cog._refresh_lobby()
+
+    await interaction.edit_original_response(
+        content="✅ Ты покинул комнату." + (" **-15 ELO** за выход из активной игры." if game_was_started else ""),
+        embed=None,
+        view=None,
+    )
+
+
 class ExitButton(discord.ui.Button):
     def __init__(self, room_id: int):
         super().__init__(
@@ -301,82 +453,30 @@ class ExitButton(discord.ui.Button):
             await interaction.response.send_message("Ты не в этой комнате.", ephemeral=True)
             return
 
-        players = await db.get_room_players(self.room_id)
-        me = next((p for p in players if p["discord_id"] == interaction.user.id), None)
-        was_captain = bool(me and me["is_captain"])
-        my_team = me["team"] if me else None
-
-        game_was_started = room["status"] == "started"
-
-        await db.remove_from_room(self.room_id, interaction.user.id)
-
-        guild = interaction.guild
-        rooms_cog = bot.cogs.get("Rooms")
-        channel = guild.get_channel(room["channel_id"]) if guild else None
-
-        if channel and rooms_cog:
-            await rooms_cog._deny_channel(channel, interaction.user)
-
-        # Штраф за выход во время игры
-        if game_was_started:
-            new_elo = await db.deduct_elo_for_leave(interaction.user.id, 15)
-            if channel:
-                await channel.send(
-                    f"⚠️ {interaction.user.mention} покинул игру и получает штраф **-15 ELO** "
-                    f"(теперь {new_elo} ELO). Игра отменена, комната возобновляет набор игроков."
-                )
-            # Обновляем ранговую роль
-            from cogs.register import Register
-            reg_cog: Register = bot.cogs.get("Register")  # type: ignore
-            if reg_cog and guild:
-                member = guild.get_member(interaction.user.id)
-                if member:
-                    await reg_cog._sync_rank_role(member, new_elo)
-        else:
-            if channel:
-                await channel.send(f"👋 {interaction.user.mention} покинул комнату.")
-
-        players = await db.get_room_players(self.room_id)
-
-        if not players:
-            await interaction.response.send_message("✅ Ты покинул комнату. Она удалена (все ушли).", ephemeral=True)
-            if channel:
-                await channel.delete(reason="Комната пуста")
-            await db.delete_room(self.room_id)
-            if rooms_cog:
-                await rooms_cog._refresh_lobby()
+        # Если игра уже началась — показываем предупреждение
+        if room["status"] == "started":
+            player = await db.get_player(interaction.user.id)
+            current_elo = player["elo"] if player else 0
+            new_elo_preview = max(0, current_elo - 15)
+            embed = discord.Embed(
+                title="⚠️ Внимание! Выход из активной игры",
+                description=(
+                    "Ты собираешься покинуть **начавшуюся игру**.\n\n"
+                    f"**Штраф:** `-15 ELO` ({current_elo} → {new_elo_preview})\n\n"
+                    "Игра будет **отменена** для всей комнаты.\n\n"
+                    "Если у тебя проблема — вызови администратора."
+                ),
+                color=0xED4245,
+            )
+            view = ExitConfirmView(self.room_id)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
 
-        if was_captain and my_team and rooms_cog:
-            team_left = [p for p in players if p["team"] == my_team]
-            if team_left:
-                new_cap = max(team_left, key=lambda p: p["elo"])
-                await db.set_captain(self.room_id, new_cap["discord_id"], True)
-                if channel:
-                    m = guild.get_member(new_cap["discord_id"])
-                    if m:
-                        await channel.send(f"👑 {m.mention} назначен новым капитаном команды {my_team}.")
-
-        # Сброс статуса в waiting (и при старте, и при full/picking)
-        if room["status"] in ("full", "picking", "started"):
-            await db.update_room_status(self.room_id, "waiting")
-            await db.set_ready(self.room_id, 1, False)
-            await db.set_ready(self.room_id, 2, False)
-            # Сбрасываем end_vote всем игрокам комнаты
-            for p in players:
-                await db.set_end_vote(self.room_id, p["discord_id"], None)
-
-        if rooms_cog:
-            await rooms_cog._refresh_room_embed(self.room_id)
-            await rooms_cog._refresh_lobby()
-
-        await interaction.response.send_message(
-            "✅ Ты покинул комнату." + (" **-15 ELO** за выход из активной игры." if game_was_started else ""),
-            ephemeral=True,
-        )
+        # Обычный выход (игра не началась) — без предупреждения
+        await interaction.response.defer(ephemeral=True)
+        await _do_exit(interaction, self.room_id)
 
 
-class ReadyButton(discord.ui.Button):
     def __init__(self, team: int, room_id: int):
         super().__init__(
             label=f"✅ Team {team} Ready / Команда {team} Готова",
