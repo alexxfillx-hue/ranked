@@ -2191,16 +2191,20 @@ class Rooms(commands.Cog):
 
                 if room["mode"] == "team":
                     screenshot_note = (
-                        "📸 **When the game ends**, any player must send a screenshot of the result in this channel.\n\n"
+                        "📸 **Когда игра закончится** — любой игрок должен прислать скриншот результата в этот канал.\n"
+                        "После этого **хотя бы один игрок от каждой команды** нажимает кнопку результата.\n\n"
+                        "📸 **When the game ends** — any player must send a screenshot of the result in this channel.\n"
                         "After that, **at least one player from each team** must press the result button."
                     )
                 else:
                     screenshot_note = (
-                        f"📸 **When the game ends**, {cap_mentions} — please send a screenshot of the result in this channel.\n\n"
+                        f"📸 **Когда игра закончится**, {cap_mentions} — пришлите скриншот результата в этот канал.\n"
+                        "После получения скриншота появятся кнопки **Победа / Ничья / Поражение**.\n\n"
+                        f"📸 **When the game ends**, {cap_mentions} — please send a screenshot of the result in this channel.\n"
                         "After the screenshot is received, the **Win / Draw / Loss** buttons will appear."
                     )
                 start_embed = discord.Embed(
-                    title="🚀 GAME STARTED!",
+                    title="🚀 ИГРА НАЧАЛАСЬ! / GAME STARTED!",
                     description=f"{mentions}\n\n{screenshot_note}",
                     color=0x57F287,
                 )
@@ -2541,18 +2545,24 @@ class Rooms(commands.Cog):
 
         if room["mode"] == "team":
             vote_desc = (
-                f"Screenshot from {message.author.mention} accepted.\n\n"
+                f"Скриншот от {message.author.mention} принят.\n"
+                "**Хотя бы один игрок от каждой команды** должен нажать кнопку результата:\n"
+                "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**\n\n"
+                f"Screenshot from {message.author.mention} accepted.\n"
                 "**At least one player from each team** must press the result button:\n"
                 "**(🏆 Win + 💀 Loss)** or **(🤝 Draw + 🤝 Draw)**"
             )
         else:
             vote_desc = (
-                f"Screenshot from {message.author.mention} accepted.\n\n"
+                f"Скриншот от {message.author.mention} принят.\n"
+                f"{cap_mentions} — нажмите кнопку с вашим результатом:\n"
+                "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**\n\n"
+                f"Screenshot from {message.author.mention} accepted.\n"
                 f"{cap_mentions} — press the button with your result:\n"
                 "**(🏆 Win + 💀 Loss)** or **(🤝 Draw + 🤝 Draw)**"
             )
         vote_embed = discord.Embed(
-            title="📸 Screenshot received! Vote for the result",
+            title="📸 Скриншот получен! / Screenshot received! — Голосование / Vote",
             description=vote_desc,
             color=0xF1C40F,
         )

@@ -373,91 +373,187 @@ class Leaderboard(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.command(name="eloinfo")
-    async def eloinfo(self, ctx: commands.Context):
-        """Explains how ELO is gained and lost in each mode and format."""
+    async def eloinfo(self, ctx: commands.Context, lang: str = None):
+        """
+        Объясняет систему ELO. Язык: !eloinfo ru  или  !eloinfo en
+        Без аргумента — отправляет оба языка.
+        """
         if not self._is_guild(ctx):
             return
 
-        embed = discord.Embed(
-            title="📊  ELO System — How it works",
-            color=0xFFD700,
-        )
+        # Нормализуем аргумент
+        lang = (lang or "").lower().strip()
+        if lang not in ("ru", "en", ""):
+            await ctx.send("Укажи язык: `!eloinfo ru` или `!eloinfo en`")
+            return
 
-        embed.add_field(
-            name="🏆 Base ELO by rating zone",
-            value=(
-                "```\n"
-                "ELO range   │  Win   │  Loss\n"
-                "────────────┼────────┼──────\n"
-                "   0 – 300  │  +7    │  -3\n"
-                " 301 – 600  │  +5    │  -4\n"
-                " 601 – 800  │  +3    │  -5\n"
-                " 801 – 1000 │  +2    │  -6\n"
-                "  1001+     │  +2    │  -6\n"
-                "```"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="⚙️ Format multiplier",
-            value=(
-                "```\n"
-                "Format  │ Multiplier\n"
-                "────────┼───────────\n"
-                "  1v1   │  × 0.7\n"
-                "  2v2   │  × 1.0\n"
-                "  3v3   │  × 1.05\n"
-                "  4v4   │  × 1.2\n"
-                "```"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="👥 Mode modifier — Team mode",
-            value=(
-                "In **team** mode the final ELO change is multiplied by **× 0.7** "
-                "(reduced because players self-organize their teams).\n"
-                "Minimum: **+1** per win, **-1** per loss (capped at -7)."
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="🎲 Random / 🎯 Cap modes",
-            value=(
-                "No mode penalty. Formula: `base × format_mult`.\n"
-                "Minimum: **+1** per win, **-1** per loss (capped at **-7**)."
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="⚠️ Penalty games",
-            value=(
-                "If you have **penalty games** active:\n"
-                "• Win ELO is halved (`÷ 2`).\n"
-                "• Loss ELO is doubled (`× 2`).\n"
-                "Penalty is removed after completing the penalised games."
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="🛡️ ELO floor",
-            value="Your ELO can never drop below **0**. If you're at 0 and lose, you stay at 0.",
-            inline=False,
-        )
-        embed.add_field(
-            name="📖 Example — 4v4 Cap, ELO 350",
-            value=(
-                "Base (win, zone 301-600): **+5**\n"
-                "Format (4v4): × 1.2 → **+6**\n"
-                "Mode (cap): no penalty → **+6 ELO**\n\n"
-                "Base (loss, zone 301-600): **-4**\n"
-                "Format (4v4): × 1.2 → **-4.8 → -5**\n"
-                "Mode (cap): no penalty → **-5 ELO**"
-            ),
-            inline=False,
-        )
-        embed.set_footer(text="Use !elo [day/week/month/all] to see your ELO chart.")
-        await ctx.send(embed=embed)
+        embeds_to_send = []
+
+        # ── Русский embed ──────────────────────────────────────────
+        if lang in ("ru", ""):
+            embed_ru = discord.Embed(
+                title="📊  Система ELO — Как это работает",
+                color=0xFFD700,
+            )
+            embed_ru.add_field(
+                name="🏆 Базовые очки по зонам рейтинга",
+                value=(
+                    "```\n"
+                    "Диапазон ELO │  Победа │ Поражение\n"
+                    "─────────────┼─────────┼──────────\n"
+                    "    0 – 300  │   +7    │    -3\n"
+                    "  301 – 600  │   +5    │    -4\n"
+                    "  601 – 800  │   +3    │    -5\n"
+                    " 801 – 1000  │   +2    │    -6\n"
+                    "   1001+     │   +2    │    -6\n"
+                    "```"
+                ),
+                inline=False,
+            )
+            embed_ru.add_field(
+                name="⚙️ Множитель формата",
+                value=(
+                    "```\n"
+                    "Формат  │ Множитель\n"
+                    "────────┼──────────\n"
+                    "  1v1   │  × 0.7\n"
+                    "  2v2   │  × 1.0\n"
+                    "  3v3   │  × 1.05\n"
+                    "  4v4   │  × 1.2\n"
+                    "```"
+                ),
+                inline=False,
+            )
+            embed_ru.add_field(
+                name="👥 Модификатор режима — Командный (team)",
+                value=(
+                    "В режиме **team** итоговое изменение ELO умножается на **× 0.7** "
+                    "(снижено, т.к. игроки сами собирают команды).\n"
+                    "Минимум: **+1** за победу, **-1** за поражение (не более **-7**)."
+                ),
+                inline=False,
+            )
+            embed_ru.add_field(
+                name="🎲 Режимы Random / 🎯 Cap",
+                value=(
+                    "Штрафного множителя нет. Формула: `база × множитель_формата`.\n"
+                    "Минимум: **+1** за победу, **-1** за поражение (не более **-7**)."
+                ),
+                inline=False,
+            )
+            embed_ru.add_field(
+                name="⚠️ Штрафные игры",
+                value=(
+                    "Если у тебя активны **штрафные игры**:\n"
+                    "• ELO за победу делится пополам (`÷ 2`).\n"
+                    "• ELO за поражение удваивается (`× 2`).\n"
+                    "Штраф снимается после отыгрывания нужного количества игр."
+                ),
+                inline=False,
+            )
+            embed_ru.add_field(
+                name="🛡️ Минимум ELO",
+                value="ELO не может упасть ниже **0**. Если ты на 0 и проиграл — остаёшься на 0.",
+                inline=False,
+            )
+            embed_ru.add_field(
+                name="📖 Пример — 4v4 Cap, ELO 350",
+                value=(
+                    "База (победа, зона 301–600): **+5**\n"
+                    "Формат (4v4): × 1.2 → **+6**\n"
+                    "Режим (cap): штрафа нет → **+6 ELO**\n\n"
+                    "База (поражение, зона 301–600): **-4**\n"
+                    "Формат (4v4): × 1.2 → **-4.8 → -5**\n"
+                    "Режим (cap): штрафа нет → **-5 ELO**"
+                ),
+                inline=False,
+            )
+            embed_ru.set_footer(text="Используй !elo [day/week/month/all] чтобы посмотреть график ELO.")
+            embeds_to_send.append(embed_ru)
+
+        # ── English embed ──────────────────────────────────────────
+        if lang in ("en", ""):
+            embed_en = discord.Embed(
+                title="📊  ELO System — How it works",
+                color=0x5865F2,
+            )
+            embed_en.add_field(
+                name="🏆 Base ELO by rating zone",
+                value=(
+                    "```\n"
+                    "ELO range   │  Win   │  Loss\n"
+                    "────────────┼────────┼──────\n"
+                    "   0 – 300  │  +7    │  -3\n"
+                    " 301 – 600  │  +5    │  -4\n"
+                    " 601 – 800  │  +3    │  -5\n"
+                    " 801 – 1000 │  +2    │  -6\n"
+                    "  1001+     │  +2    │  -6\n"
+                    "```"
+                ),
+                inline=False,
+            )
+            embed_en.add_field(
+                name="⚙️ Format multiplier",
+                value=(
+                    "```\n"
+                    "Format  │ Multiplier\n"
+                    "────────┼───────────\n"
+                    "  1v1   │  × 0.7\n"
+                    "  2v2   │  × 1.0\n"
+                    "  3v3   │  × 1.05\n"
+                    "  4v4   │  × 1.2\n"
+                    "```"
+                ),
+                inline=False,
+            )
+            embed_en.add_field(
+                name="👥 Mode modifier — Team mode",
+                value=(
+                    "In **team** mode the final ELO change is multiplied by **× 0.7** "
+                    "(reduced because players self-organize their teams).\n"
+                    "Minimum: **+1** per win, **-1** per loss (capped at -7)."
+                ),
+                inline=False,
+            )
+            embed_en.add_field(
+                name="🎲 Random / 🎯 Cap modes",
+                value=(
+                    "No mode penalty. Formula: `base × format_mult`.\n"
+                    "Minimum: **+1** per win, **-1** per loss (capped at **-7**)."
+                ),
+                inline=False,
+            )
+            embed_en.add_field(
+                name="⚠️ Penalty games",
+                value=(
+                    "If you have **penalty games** active:\n"
+                    "• Win ELO is halved (`÷ 2`).\n"
+                    "• Loss ELO is doubled (`× 2`).\n"
+                    "Penalty is removed after completing the penalised games."
+                ),
+                inline=False,
+            )
+            embed_en.add_field(
+                name="🛡️ ELO floor",
+                value="Your ELO can never drop below **0**. If you're at 0 and lose, you stay at 0.",
+                inline=False,
+            )
+            embed_en.add_field(
+                name="📖 Example — 4v4 Cap, ELO 350",
+                value=(
+                    "Base (win, zone 301-600): **+5**\n"
+                    "Format (4v4): × 1.2 → **+6**\n"
+                    "Mode (cap): no penalty → **+6 ELO**\n\n"
+                    "Base (loss, zone 301-600): **-4**\n"
+                    "Format (4v4): × 1.2 → **-4.8 → -5**\n"
+                    "Mode (cap): no penalty → **-5 ELO**"
+                ),
+                inline=False,
+            )
+            embed_en.set_footer(text="Use !elo [day/week/month/all] to see your ELO chart.")
+            embeds_to_send.append(embed_en)
+
+        await ctx.send(embeds=embeds_to_send)
 
     @commands.command(name="stat")
     async def stat(self, ctx: commands.Context, member: discord.Member = None):
