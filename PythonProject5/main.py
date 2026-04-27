@@ -127,6 +127,10 @@ async def help_cmd(ctx: commands.Context):
         ("!profile [@игрок]", "Профиль игрока"),
         ("!elo [day/week/month/all] [@игрок]", "График ELO"),
         ("!top", "Топ-10 по ELO"),
+        ("!streak [@игрок]", "История игр и текущая серия"),
+        ("!stat [@игрок]", "Статистика личных встреч"),
+        ("!eloinfo [ru/en]", "Как работает система ELO"),
+        ("!commands", "Подробное описание команд игрока"),
         ("!report @игрок причина", "Пожаловаться на игрока"),
         ("!rules", "Правила сервера"),
         ("!mod_kick @игрок", "[Мод] Кикнуть из комнаты"),
@@ -167,6 +171,10 @@ async def slash_top(interaction: discord.Interaction):
 @bot.tree.command(name="help", description="Список всех команд бота: !help")
 async def slash_help(interaction: discord.Interaction):
     await interaction.response.send_message("Используй: `!help`", ephemeral=True)
+
+@bot.tree.command(name="commands", description="Подробное описание команд для игроков: !commands")
+async def slash_commands(interaction: discord.Interaction):
+    await interaction.response.send_message("Используй: `!commands`", ephemeral=True)
 
 
 async def main():
