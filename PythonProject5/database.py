@@ -308,7 +308,7 @@ class Database:
             """SELECT r.* FROM rooms r
                JOIN room_players rp ON r.room_id=rp.room_id
                WHERE rp.discord_id=$1
-                 AND r.status IN ('waiting','full','started','picking')""",
+                 AND r.status IN ('waiting','full','started','picking','awaiting_screenshot')""",
             discord_id,
         )
         return _row(r)
@@ -434,7 +434,7 @@ class Database:
         """Все активные комнаты для отображения в лобби."""
         rows = await self.pool.fetch(
             """SELECT * FROM rooms
-               WHERE status IN ('waiting', 'full', 'picking', 'started')
+               WHERE status IN ('waiting', 'full', 'picking', 'started', 'awaiting_screenshot')
                ORDER BY created_at ASC"""
         )
         return _rows(rows)
