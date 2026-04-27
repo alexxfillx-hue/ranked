@@ -165,19 +165,19 @@ def profile_embed(player, member: discord.Member) -> discord.Embed:
         color=color,
     )
     embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="🏆 Ранг", value=rank_name, inline=True)
+    embed.add_field(name="🏆 Rank", value=rank_name, inline=True)
     embed.add_field(name="📊 ELO", value=str(player["elo"]), inline=True)
-    embed.add_field(name="🎮 Игр", value=str(total), inline=True)
-    embed.add_field(name="✅ Победы", value=str(player["wins"]), inline=True)
-    embed.add_field(name="❌ Поражения", value=str(player["losses"]), inline=True)
-    embed.add_field(name="🤝 Ничьи", value=str(player["draws"]), inline=True)
-    embed.add_field(name="📈 Винрейт", value=f"{wr}%", inline=True)
+    embed.add_field(name="🎮 Games", value=str(total), inline=True)
+    embed.add_field(name="✅ Wins", value=str(player["wins"]), inline=True)
+    embed.add_field(name="❌ Losses", value=str(player["losses"]), inline=True)
+    embed.add_field(name="🤝 Draws", value=str(player["draws"]), inline=True)
+    embed.add_field(name="📈 Winrate", value=f"{wr}%", inline=True)
     if streak >= 2:
-        embed.add_field(name="🔥 Вин-стрик", value=str(streak), inline=True)
+        embed.add_field(name="🔥 Win streak", value=str(streak), inline=True)
     reports = player["report_count"] if "report_count" in player.keys() else 0
-    embed.add_field(name="🚩 Репортов", value=str(reports), inline=True)
+    embed.add_field(name="🚩 Reports", value=str(reports), inline=True)
     if player["penalty_games"]:
         embed.add_field(
-            name="⚠️ Штраф", value=f"Ещё {player['penalty_games']} игр", inline=True
+            name="⚠️ Penalty", value=f"{player['penalty_games']} games left", inline=True
         )
     return embed
