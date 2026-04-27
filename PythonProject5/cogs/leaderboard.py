@@ -373,7 +373,7 @@ class Leaderboard(commands.Cog):
             lines_out.append(line)
             length += len(line) + 1
         chunk = "\n".join(lines_out)
-        embed.add_field(name="Recent games (detailed)", value=chunk or "—", inline=False)
+        embed.add_field(name=f"Recent games — last {len(lines_out)} (detailed)", value=chunk or "—", inline=False)
         embed.add_field(name="Current streak", value=streak_label, inline=True)
         embed.add_field(name="Total games", value=str(total), inline=True)
         embed.add_field(name="W / L / D", value=f"{wins} / {losses} / {draws}", inline=True)
