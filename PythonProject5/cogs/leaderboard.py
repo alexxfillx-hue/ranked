@@ -592,6 +592,140 @@ class Leaderboard(commands.Cog):
         embed.set_footer(text=f"Total unique opponents: {len(rows)}")
         await ctx.send(embed=embed)
 
+    @commands.command(name="commands")
+    async def commands_info(self, ctx: commands.Context):
+        """Объясняет доступные команды на русском и английском."""
+        if not self._is_guild(ctx):
+            return
+
+        # ── Русский embed ──────────────────────────────────────────
+        embed_ru = discord.Embed(
+            title="📖  Команды для игроков",
+            color=0x57F287,
+        )
+        embed_ru.add_field(
+            name="👤  Профиль и статистика",
+            value=(
+                "**`!profile [@игрок]`**\n"
+                "Показывает карточку игрока: ранг, ELO, количество игр, побед, поражений, ничьих, винрейт и серию побед.\n"
+                "Без аргумента — твой профиль. С упоминанием — профиль другого игрока.\n\n"
+
+                "**`!elo [day/week/month/all] [@игрок]`**\n"
+                "График изменения ELO за выбранный период. По умолчанию — всё время.\n"
+                "Пример: `!elo week` или `!elo month @игрок`\n\n"
+
+                "**`!streak [@игрок]`**\n"
+                "История последних игр в виде цветных кружков (🟢 победа · 🔴 поражение · 🟡 ничья), "
+                "текущая серия и подробная таблица с изменениями ELO по каждой игре.\n\n"
+
+                "**`!stat [@игрок]`**\n"
+                "Статистика личных встреч: против кого больше всего побед, поражений и кто самый частый соперник."
+            ),
+            inline=False,
+        )
+        embed_ru.add_field(
+            name="🎮  Игры и комнаты",
+            value=(
+                "**`!create [1/2/3/4] [team/random/cap]`**\n"
+                "Создаёт игровую комнату.\n"
+                "• `team` — каждый сам выбирает команду через `!pick 1` или `!pick 2`\n"
+                "• `random` — бот раскидывает игроков по командам случайно при заполнении\n"
+                "• `cap` — два капитана поочерёдно выбирают игроков\n"
+                "Без аргументов — появится панель с кнопками для выбора."
+            ),
+            inline=False,
+        )
+        embed_ru.add_field(
+            name="📊  Рейтинги и система",
+            value=(
+                "**`!top`**\n"
+                "Таблица лидеров по ELO с листанием по страницам. Показывает ранг, ELO и винрейт каждого игрока.\n\n"
+
+                "**`!ranks`**\n"
+                "Таблица всех рангов и необходимый ELO для каждого: от Bronze I до Master.\n\n"
+
+                "**`!eloinfo [ru/en]`**\n"
+                "Подробное объяснение системы ELO: базовые очки по зонам рейтинга, множители формата (1v1–4v4), "
+                "модификатор командного режима, штрафные игры и минимальный ELO."
+            ),
+            inline=False,
+        )
+        embed_ru.add_field(
+            name="🚩  Жалобы",
+            value=(
+                "**`!report @игрок <причина>`**\n"
+                "Отправляет жалобу на игрока администрации. Лимит — **5 жалоб в сутки**. "
+                "Нельзя пожаловаться на самого себя или дважды на одного и того же игрока."
+            ),
+            inline=False,
+        )
+        embed_ru.set_footer(text="!commands — список команд для игроков")
+
+        # ── English embed ──────────────────────────────────────────
+        embed_en = discord.Embed(
+            title="📖  Player Commands",
+            color=0x5865F2,
+        )
+        embed_en.add_field(
+            name="👤  Profile & Stats",
+            value=(
+                "**`!profile [@player]`**\n"
+                "Shows a player card: rank, ELO, games played, wins, losses, draws, winrate and win streak.\n"
+                "No argument — your own profile. With a mention — another player's profile.\n\n"
+
+                "**`!elo [day/week/month/all] [@player]`**\n"
+                "ELO change chart for the selected period. Defaults to all time.\n"
+                "Example: `!elo week` or `!elo month @player`\n\n"
+
+                "**`!streak [@player]`**\n"
+                "Recent game history as coloured dots (🟢 win · 🔴 loss · 🟡 draw), "
+                "current streak and a detailed table with ELO changes per game.\n\n"
+
+                "**`!stat [@player]`**\n"
+                "Head-to-head stats: most wins against, most losses against and most frequent opponents."
+            ),
+            inline=False,
+        )
+        embed_en.add_field(
+            name="🎮  Games & Rooms",
+            value=(
+                "**`!create [1/2/3/4] [team/random/cap]`**\n"
+                "Creates a game room.\n"
+                "• `team` — each player picks their team with `!pick 1` or `!pick 2`\n"
+                "• `random` — the bot randomly distributes players when the room fills up\n"
+                "• `cap` — two captains take turns picking players\n"
+                "No arguments — an interactive button panel will appear."
+            ),
+            inline=False,
+        )
+        embed_en.add_field(
+            name="📊  Rankings & System",
+            value=(
+                "**`!top`**\n"
+                "Full player leaderboard with page navigation. Shows rank, ELO and winrate for each player.\n\n"
+
+                "**`!ranks`**\n"
+                "Full rank table with required ELO for each tier: Bronze I through Master.\n\n"
+
+                "**`!eloinfo [ru/en]`**\n"
+                "Detailed explanation of the ELO system: base points by rating zone, format multipliers (1v1–4v4), "
+                "team mode modifier, penalty games and the ELO floor."
+            ),
+            inline=False,
+        )
+        embed_en.add_field(
+            name="🚩  Reports",
+            value=(
+                "**`!report @player <reason>`**\n"
+                "Sends a report about a player to the administration. Limit — **5 reports per day**. "
+                "You cannot report yourself or report the same player twice."
+            ),
+            inline=False,
+        )
+        embed_en.set_footer(text="!commands — player command reference")
+
+        await ctx.send(embeds=[embed_ru, embed_en])
+
 
 async def setup(bot):
     await bot.add_cog(Leaderboard(bot))
