@@ -3,82 +3,6 @@ from discord.ext import commands
 
 from config import Config, get_rank
 
-PAGE_SIZE = 10
-
-
-def _build_leaderboard_embed(players: list, page: int, total_players: int) -> discord.Embed:
-    """Строит embed для страницы лидерборда."""
-    total_pages = max(1, (total_players + PAGE_SIZE - 1) // PAGE_SIZE)
-    start = page * PAGE_SIZE
-    page_players = players[start:start + PAGE_SIZE]
-
-    medals = ["🥇", "🥈", "🥉"] + ["🔹"] * (PAGE_SIZE - 3)
-    lines = []
-    for i, p in enumerate(page_players):
-        rank_name, _ = get_rank(p["elo"])
-        total = p["wins"] + p["losses"] + p["draws"]
-        wr = round(p["wins"] / total * 100) if total else 0
-        pos = start + i
-        medal = medals[pos] if pos < len(medals) else "🔹"
-        lines.append(
-            f"{medal} **{pos + 1}.** {p['username']} — "
-            f"**{p['elo']}** ELO  |  {rank_name}  |  WR {wr}%"
-        )
-
-    embed = discord.Embed(
-        title="🏆  Топ игроков по ELO / Leaderboard",
-        description="\n".join(lines),
-        color=0xFFD700,
-    )
-    embed.set_footer(
-        text=f"Страница {page + 1}/{total_pages}  ·  Всего игроков / Total players: {total_players}"
-    )
-    return embed
-
-
-class LeaderboardView(discord.ui.View):
-    """View с кнопками листания лидерборда."""
-
-    def __init__(self, players: list, page: int = 0):
-        super().__init__(timeout=120)
-        self.players = players
-        self.page = page
-        self.total_pages = max(1, (len(players) + PAGE_SIZE - 1) // PAGE_SIZE)
-        self._update_buttons()
-
-    def _update_buttons(self):
-        self.prev_btn.disabled = self.page == 0
-        self.next_btn.disabled = self.page >= self.total_pages - 1
-        self.page_label.label = f"{self.page + 1} / {self.total_pages}"
-
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="lb_prev")
-    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.page = max(0, self.page - 1)
-        self._update_buttons()
-        embed = _build_leaderboard_embed(self.players, self.page, len(self.players))
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.secondary,
-                       disabled=True, custom_id="lb_page")
-    async def page_label(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="lb_next")
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.page = min(self.total_pages - 1, self.page + 1)
-        self._update_buttons()
-        embed = _build_leaderboard_embed(self.players, self.page, len(self.players))
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def on_timeout(self):
-        # Убираем кнопки когда истекает timeout
-        for item in self.children:
-            item.disabled = True
-        try:
-            await self.message.edit(view=self)
-        except Exception:
-            pass
-
 
 class Leaderboard(commands.Cog):
     def __init__(self, bot):
@@ -92,19 +16,30 @@ class Leaderboard(commands.Cog):
         if not self._is_guild(ctx):
             return
 
-        players = await self.bot.db.get_all_players_ranked()
+        players = await self.bot.db.get_top(limit=10)
         if not players:
             await ctx.send("Пока нет зарегистрированных игроков.")
             return
 
-        embed = _build_leaderboard_embed(players, page=0, total_players=len(players))
-        view = LeaderboardView(players, page=0)
-        # Если один лист — не показываем кнопки
-        if view.total_pages <= 1:
-            msg = await ctx.send(embed=embed)
-        else:
-            msg = await ctx.send(embed=embed, view=view)
-            view.message = msg
+        embed = discord.Embed(
+            title="🏆  Топ-10 игроков по ELO",
+            color=0xFFD700,
+        )
+
+        medals = ["🥇", "🥈", "🥉"] + ["🔹"] * 7
+        lines = []
+        for i, p in enumerate(players):
+            rank_name, _ = get_rank(p["elo"])
+            total = p["wins"] + p["losses"] + p["draws"]
+            wr = round(p["wins"] / total * 100) if total else 0
+            lines.append(
+                f"{medals[i]} **{i+1}.** {p['username']} — "
+                f"**{p['elo']}** ELO  |  {rank_name}  |  WR {wr}%"
+            )
+
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"Всего игроков: {len(players)}")
+        await ctx.send(embed=embed)
 
     @commands.command(name="report")
     async def report(self, ctx: commands.Context, member: discord.Member, *, reason: str):
@@ -127,18 +62,29 @@ class Leaderboard(commands.Cog):
 
         await db.add_report(ctx.author.id, member.id, reason)
 
+        # отправляем в канал администрации
         admin_channel = discord.utils.find(
             lambda c: Config.ADMIN_CHANNEL_NAME in c.name or c.name == Config.ADMIN_CHANNEL_NAME,
             ctx.guild.text_channels,
         )
         if admin_channel:
-            embed = discord.Embed(title="🚨 Жалоба", color=0xED4245)
-            embed.add_field(name="От кого", value=f"{ctx.author.mention} (`{ctx.author}`)", inline=True)
-            embed.add_field(name="На кого", value=f"{member.mention} (`{member}`)", inline=True)
+            embed = discord.Embed(
+                title="🚨 Жалоба",
+                color=0xED4245,
+            )
+            embed.add_field(
+                name="От кого", value=f"{ctx.author.mention} (`{ctx.author}`)", inline=True
+            )
+            embed.add_field(
+                name="На кого", value=f"{member.mention} (`{member}`)", inline=True
+            )
             embed.add_field(name="Причина", value=reason, inline=False)
             await admin_channel.send(embed=embed)
 
-        await ctx.send("✅ Жалоба отправлена администрации. Спасибо!", delete_after=10)
+        await ctx.send(
+            "✅ Жалоба отправлена администрации. Спасибо!",
+            delete_after=10,
+        )
         try:
             await ctx.message.delete()
         except discord.Forbidden:
@@ -159,7 +105,11 @@ class Leaderboard(commands.Cog):
         for i, (min_e, max_e, name, color, _) in enumerate(RANKS):
             emoji = rank_emojis[i] if i < len(rank_emojis) else "🔹"
             max_str = str(max_e) if max_e < 99999 else "∞"
-            embed.add_field(name=f"{emoji} {name}", value=f"`{min_e}` — `{max_str}` ELO", inline=True)
+            embed.add_field(
+                name=f"{emoji} {name}",
+                value=f"`{min_e}` — `{max_str}` ELO",
+                inline=True,
+            )
         embed.set_footer(text="ELO начисляется за победы в матчах")
         await ctx.send(embed=embed)
 
@@ -167,10 +117,19 @@ class Leaderboard(commands.Cog):
     async def mod_plus(self, ctx: commands.Context, member: discord.Member, amount: int):
         if not self._is_guild(ctx):
             return
+        if not (ctx.author.guild_permissions.administrator or
+                discord.utils.get(ctx.author.roles, name=self.bot.db.__class__.__module__) or
+                any(r.name == "Модератор" for r in ctx.author.roles) or
+                ctx.author.guild_permissions.administrator):
+            from config import Config as _C
+            if not any(r.name == _C.MODERATOR_ROLE_NAME for r in ctx.author.roles) and \
+               not ctx.author.guild_permissions.administrator:
+                await ctx.send("❌ Нет прав. Только модераторы могут изменять ELO.")
+                return
         from config import Config as _C
         if not any(r.name == _C.MODERATOR_ROLE_NAME for r in ctx.author.roles) and \
            not ctx.author.guild_permissions.administrator:
-            await ctx.send("❌ Нет прав. Только модераторы могут изменять ELO.")
+            await ctx.send("❌ Нет прав.")
             return
         if amount <= 0:
             await ctx.send("❌ Укажи положительное число.")
@@ -211,12 +170,17 @@ class Leaderboard(commands.Cog):
                 await reg_cog._sync_rank_role(m, new_elo)
         await ctx.send(f"✅ **{member.display_name}** -{amount} ELO → **{new_elo}** ELO")
 
+
     @commands.command(name="rules")
     async def rules(self, ctx: commands.Context):
         if not self._is_guild(ctx):
             return
 
-        embed = discord.Embed(title="👋 Команды и правила / Commands & Rules", color=0x5865F2)
+        embed = discord.Embed(
+            title="👋 Команды и правила / Commands & Rules",
+            color=0x5865F2,
+        )
+
         embed.add_field(
             name="🇷🇺 Русский — Команды бота",
             value=(
@@ -231,23 +195,28 @@ class Leaderboard(commands.Cog):
                 "`!queue [размер] [режим]` или `!q` — войти в очередь\n"
                 "`!exit` — покинуть комнату\n"
                 "`!kick @игрок` — кикнуть игрока (только капитан)\n"
-                "`!start` — начать игру\n\n"
+                "`!start` — начать игру (оба капитана должны подтвердить)\n\n"
                 "**Результат игры:**\n"
-                "`!win` — победа  |  `!lose` — поражение  |  `!draw` — ничья\n\n"
+                "`!win` — заявить победу\n"
+                "`!lose` — заявить поражение\n"
+                "`!draw` — заявить ничью\n\n"
                 "**Профиль и статистика:**\n"
-                "`!profile [@игрок]` — профиль  |  `!elo [day/week/month/all]` — график ELO\n"
-                "`!top` — лидерборд (листается кнопками ◀ ▶)\n\n"
+                "`!profile [@игрок]` — посмотреть профиль\n"
+                "`!elo [day/week/month/all] [@игрок]` — график ELO\n"
+                "`!top` — топ-10 игроков\n\n"
                 "**Прочее:**\n"
-                "`!report @игрок причина` — жалоба  |  `!help` — список команд\n"
+                "`!report @игрок причина` — пожаловаться на игрока\n"
+                "`!help` — список всех команд\n"
             ),
             inline=False,
         )
+
         embed.add_field(
             name="🇬🇧 English — Bot Commands",
             value=(
                 "**Registration:**\n"
-                "`!register <nick>` — register (required!)\n"
-                "`!rename <new_nick>` — change your in-game nickname\n\n"
+                "`!register <nickname>` — register yourself (required!)\n"
+                "`!rename <new_nickname>` — change your in-game nickname\n\n"
                 "**Rooms:**\n"
                 "`!create [1/2/3/4] [team/random/cap]` — create a room\n"
                 "  • `team` — players pick their own team\n"
@@ -256,17 +225,22 @@ class Leaderboard(commands.Cog):
                 "`!queue [size] [mode]` or `!q` — join a queue\n"
                 "`!exit` — leave the room\n"
                 "`!kick @player` — kick a player (captain only)\n"
-                "`!start` — start the game\n\n"
+                "`!start` — start the game (both captains must confirm)\n\n"
                 "**Game result:**\n"
-                "`!win` — win  |  `!lose` — loss  |  `!draw` — draw\n\n"
+                "`!win` — report a win\n"
+                "`!lose` — report a loss\n"
+                "`!draw` — report a draw\n\n"
                 "**Profile & Stats:**\n"
-                "`!profile [@player]` — profile  |  `!elo [day/week/month/all]` — ELO chart\n"
-                "`!top` — leaderboard (navigate with ◀ ▶ buttons)\n\n"
+                "`!profile [@player]` — view player profile\n"
+                "`!elo [day/week/month/all] [@player]` — ELO chart\n"
+                "`!top` — top-10 leaderboard\n\n"
                 "**Other:**\n"
-                "`!report @player reason` — report  |  `!help` — command list\n"
+                "`!report @player reason` — report a player\n"
+                "`!help` — full command list\n"
             ),
             inline=False,
         )
+
         embed.add_field(
             name="⚠️ Правила / Rules",
             value=(
@@ -277,43 +251,77 @@ class Leaderboard(commands.Cog):
             ),
             inline=False,
         )
+
         embed.set_footer(text="Удачи! / Good luck! 🎮")
         await ctx.send(embed=embed)
 
+
+
     @commands.command(name="streak")
     async def streak(self, ctx: commands.Context, member: discord.Member = None):
+        """
+        История результатов игр с форматом и изменением ELO.
+        Включает ВСЕ игры — в том числе сыгранные до обновления бота.
+        """
         if not self._is_guild(ctx):
             return
+
         target = member or ctx.author
         player = await self.bot.db.get_player(target.id)
         if not player:
             await ctx.send(f"{target.mention} не зарегистрирован.")
             return
+
         history = await self.bot.db.get_elo_history_simple(target.id)
+        # Фильтруем: только записи от реальных игр (game_id не NULL; change != 0 или mode задан)
+        # Записи от mod_adjust_elo (game_id=NULL) тоже оставляем, они нужны для ELO графика
+        # но для streak берём только игровые (game_id IS NOT NULL)
         game_history = [r for r in history if r.get("game_id") is not None]
         if not game_history:
             await ctx.send(f"У **{player['username']}** пока нет сыгранных игр.")
             return
+
+        # Последние 30 игр для детального списка
         recent = game_history[-30:]
 
+        # Ничьих нет — change=0 всегда поражение (ELO не двигается).
+        # Используем поле result если есть, иначе определяем по знаку change.
         def get_result(row) -> str:
             stored = row.get("result")
-            if stored == "win": return "win"
-            if stored in ("lose", "draw"): return "lose"
+            if stored == "win":
+                return "win"
+            if stored in ("lose", "draw"):
+                # draw трактуем как lose — ничьих не было
+                return "lose"
+            # Старые записи без result
             return "win" if row.get("change", 0) > 0 else "lose"
 
+        # Строка-иконки: последние 50 игр (только победа / поражение)
         icon_map = {"win": "🟢", "lose": "🔴"}
         icons = [icon_map[get_result(r)] for r in game_history[-50:]]
         streak_line = "".join(icons)
+
+        # Текущая серия
         current_result = get_result(game_history[-1])
         streak_count = 0
         for r in reversed(game_history):
-            if get_result(r) == current_result: streak_count += 1
-            else: break
-        streak_labels = {"win": f"🔥 {streak_count} побед подряд", "lose": f"❄️ {streak_count} поражений подряд"}
+            if get_result(r) == current_result:
+                streak_count += 1
+            else:
+                break
+        streak_labels = {
+            "win":  f"🔥 {streak_count} побед подряд",
+            "lose": f"❄️ {streak_count} поражений подряд",
+        }
         streak_label = streak_labels[current_result]
 
-        mode_labels = {"team": "👥 team", "random": "🎲 rand", "cap": "🎯 cap", None: "❓"}
+        # Детальный список последних 30 игр
+        mode_labels = {
+            "team":   "👥 team",
+            "random": "🎲 rand",
+            "cap":    "🎯 cap",
+            None:     "❓",
+        }
         detail_lines = []
         for r in reversed(recent):
             res = get_result(r)
@@ -326,38 +334,57 @@ class Leaderboard(commands.Cog):
             mode_label = mode_labels.get(mode, "❓")
             fmt = f"{size}v{size}" if size else "?v?"
             elo_after = r.get("elo_after", "?")
-            detail_lines.append(f"{icon} `{fmt} {mode_label}` {elo_str} ELO → **{elo_after}**")
+            detail_lines.append(
+                f"{icon} `{fmt} {mode_label}` {elo_str} ELO → **{elo_after}**"
+            )
 
+        # Discord embed field value max 1024 chars — режем по 15
         total = len(game_history)
         wins = sum(1 for r in game_history if get_result(r) == "win")
         losses = total - wins
         wr = round(wins / total * 100) if total else 0
 
-        embed = discord.Embed(title=f"📊  История игр — {player['username']}", color=0x5865F2)
-        embed.add_field(name=f"Последние {min(50, total)} игр  (🟢 победа  🔴 поражение)", value=streak_line or "—", inline=False)
+        embed = discord.Embed(
+            title=f"📊  История игр — {player['username']}",
+            color=0x5865F2,
+        )
+        embed.add_field(
+            name=f"Последние {min(50, total)} игр  (🟢 победа  🔴 поражение)",
+            value=streak_line or "—",
+            inline=False,
+        )
         chunk = "\n".join(detail_lines[:15])
         embed.add_field(name="Последние игры (детально)", value=chunk or "—", inline=False)
+
         embed.add_field(name="Текущая серия", value=streak_label, inline=True)
-        embed.add_field(name="Всего игр", value=str(total), inline=True)
-        embed.add_field(name="В / П", value=f"{wins} / {losses}", inline=True)
-        embed.add_field(name="Винрейт", value=f"{wr}%", inline=True)
+        embed.add_field(name="Всего игр",     value=str(total),   inline=True)
+        embed.add_field(name="В / П",          value=f"{wins} / {losses}", inline=True)
+        embed.add_field(name="Винрейт",        value=f"{wr}%",    inline=True)
         await ctx.send(embed=embed)
 
     @commands.command(name="stat")
     async def stat(self, ctx: commands.Context, member: discord.Member = None):
+        """Статистика против конкретных игроков: с кем больше побед/поражений"""
         if not self._is_guild(ctx):
             return
+
         target = member or ctx.author
         player = await self.bot.db.get_player(target.id)
         if not player:
             await ctx.send(f"{target.mention} не зарегистрирован.")
             return
+
         rows = await self.bot.db.get_stat_vs_players(target.id)
         if not rows:
             await ctx.send(f"У **{player['username']}** пока нет статистики против других игроков.")
             return
 
-        embed = discord.Embed(title=f"⚔️  Статистика — {player['username']}", color=0xE67E22)
+        embed = discord.Embed(
+            title=f"⚔️  Статистика — {player['username']}",
+            color=0xE67E22,
+        )
+
+        # Топ-5 по победам
         top_wins = [r for r in rows if r["wins"] > 0][:5]
         if top_wins:
             lines = []
@@ -365,6 +392,8 @@ class Leaderboard(commands.Cog):
                 wr = round(r["wins"] / r["total"] * 100) if r["total"] else 0
                 lines.append(f"• **{r['username']}** — {r['wins']}В / {r['losses']}П / {r['draws']}Н  (WR {wr}%)")
             embed.add_field(name="🏆 Больше всего побед против", value="\n".join(lines), inline=False)
+
+        # Топ-5 по поражениям
         top_losses = sorted(rows, key=lambda r: r["losses"], reverse=True)
         top_losses = [r for r in top_losses if r["losses"] > 0][:5]
         if top_losses:
@@ -373,11 +402,97 @@ class Leaderboard(commands.Cog):
                 wr = round(r["wins"] / r["total"] * 100) if r["total"] else 0
                 lines.append(f"• **{r['username']}** — {r['wins']}В / {r['losses']}П / {r['draws']}Н  (WR {wr}%)")
             embed.add_field(name="💀 Больше всего поражений против", value="\n".join(lines), inline=False)
+
+        # Лучший напарник (общие победы в одной команде — пока считаем через wins где были в одном game_id)
+        # Топ по общему числу игр
         top_played = sorted(rows, key=lambda r: r["total"], reverse=True)[:3]
         if top_played:
-            lines = [f"• **{r['username']}** — {r['total']} игр вместе" for r in top_played]
+            lines = []
+            for r in top_played:
+                lines.append(f"• **{r['username']}** — {r['total']} игр вместе")
             embed.add_field(name="🎮 Чаще всего встречался с", value="\n".join(lines), inline=False)
+
         embed.set_footer(text=f"Всего уникальных соперников: {len(rows)}")
+        await ctx.send(embed=embed)
+
+    @commands.command(name="best")
+    async def best(self, ctx: commands.Context):
+        """Лучший игрок за день, неделю и месяц с подробной статистикой."""
+        if not self._is_guild(ctx):
+            return
+
+        import datetime
+        now = datetime.datetime.utcnow()
+
+        periods = [
+            ("🌅 За день / Today",     now - datetime.timedelta(days=1)),
+            ("📅 За неделю / This week", now - datetime.timedelta(days=7)),
+            ("🗓️ За месяц / This month", now - datetime.timedelta(days=30)),
+        ]
+
+        embed = discord.Embed(
+            title="🏆 Лучший игрок / Best Player",
+            color=0xFFD700,
+        )
+
+        any_found = False
+
+        for period_label, since in periods:
+            player = await self.bot.db.get_best_player_by_period(since)
+            if not player:
+                embed.add_field(
+                    name=period_label,
+                    value="*Нет данных / No data*",
+                    inline=False,
+                )
+                continue
+
+            any_found = True
+            rank_name, _ = get_rank(player["elo"])
+            total = player["wins"] + player["losses"] + player["draws"]
+            wr_all = round(player["wins"] / total * 100) if total else 0
+
+            period_games = player["period_games"]
+            period_wins = player["period_wins"]
+            period_losses = player["period_losses"]
+            elo_gained = player["elo_gained"]
+            wr_period = round(period_wins / period_games * 100) if period_games else 0
+
+            # Лучший тиммейт и оппонент
+            teammate = await self.bot.db.get_best_teammate(player["discord_id"])
+            opponent = await self.bot.db.get_best_opponent(player["discord_id"])
+
+            lines = [
+                f"👤 **{player['username']}**  ·  {rank_name}  ·  {player['elo']} ELO",
+                f"",
+                f"**За период / This period:**",
+                f"🎮 Игр: **{period_games}**  |  ✅ Побед: **{period_wins}**  |  ❌ Поражений: **{period_losses}**",
+                f"📈 WR: **{wr_period}%**  |  +ELO: **+{elo_gained}**",
+                f"",
+                f"**Всего / Overall:**",
+                f"🎮 {total} игр  |  WR {wr_all}%",
+            ]
+
+            if teammate:
+                lines += [
+                    f"",
+                    f"🤝 **Лучший напарник / Best teammate:** {teammate['username']} ({teammate['shared_wins']} побед вместе)",
+                ]
+            if opponent:
+                lines += [
+                    f"⚔️ **Чаще побеждал / Most wins vs:** {opponent['username']} ({opponent['wins_against']} побед против)",
+                ]
+
+            embed.add_field(
+                name=period_label,
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        if not any_found:
+            embed.description = "За указанные периоды игры ещё не проводились.\nNo games played in these periods yet."
+
+        embed.set_footer(text="Учитываются все игры включая сыгранные до обновления бота")
         await ctx.send(embed=embed)
 
 
