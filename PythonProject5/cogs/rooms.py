@@ -996,10 +996,11 @@ class Rooms(commands.Cog):
         }
 
         status_labels = {
-            "waiting":  ("🟢", "Open / Открыта"),
-            "full":     ("🟡", "Full / Заполнена"),
-            "picking":  ("🟠", "Picking / Пик капитанов"),
-            "started":  ("🔴", "In Game / В игре"),
+            "waiting":             ("🟢", "Open / Открыта"),
+            "full":                ("🟡", "Full / Заполнена"),
+            "picking":             ("🟠", "Picking / Пик капитанов"),
+            "started":             ("🔴", "In Game / В игре"),
+            "awaiting_screenshot": ("📸", "Screenshot / Ждём скрин"),
         }
 
         for room in all_rooms:
@@ -1013,7 +1014,7 @@ class Rooms(commands.Cog):
             status_icon, status_text = status_labels.get(room_status, ("⚪", room_status))
 
             # Dim color for in-progress rooms
-            if room_status in ("started", "picking"):
+            if room_status in ("started", "picking", "awaiting_screenshot"):
                 color = 0x36393F
 
             embed = discord.Embed(
@@ -1893,20 +1894,11 @@ class Rooms(commands.Cog):
         if channel:
             await self._deny_channel(channel, ctx.author)
 
-        if game_was_started:
-            new_elo = await db.deduct_elo_for_leave(ctx.author.id, 15)
-            if channel:
-                await channel.send(
-                    f"⚠️ {ctx.author.mention} покинул игру и получает штраф **-15 ELO** "
-                    f"(теперь {new_elo} ELO). Игра отменена, комната возобновляет набор."
-                )
-            from cogs.register import Register
-            reg_cog: Register = self.bot.cogs.get("Register")  # type: ignore
-            if reg_cog:
-                await reg_cog._sync_rank_role(ctx.author, new_elo)
-        else:
-            if channel:
-                await channel.send(f"👋 {ctx.author.mention} покинул комнату.")
+        # Удаляем игрока из БД ДО повторного чтения списка
+        await db.remove_from_room(room["room_id"], ctx.author.id)
+
+        if channel:
+            await channel.send(f"👋 {ctx.author.mention} покинул комнату.")
 
         players = await db.get_room_players(room["room_id"])
 
