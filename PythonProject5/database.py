@@ -140,13 +140,6 @@ class Database:
             await conn.execute(
                 "ALTER TABLE rooms ADD COLUMN IF NOT EXISTS strong_side INTEGER DEFAULT 0"
             )
-            # Миграция: все старые записи без result.
-            # Ничей не было — change=0 это поражение при ELO=0 (дельта обнулялась ботом).
-            await conn.execute(
-                """UPDATE elo_history
-                   SET result = CASE WHEN change > 0 THEN 'win' ELSE 'lose' END
-                   WHERE result IS NULL"""
-            )
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -245,9 +238,9 @@ class Database:
                     )
                 await conn.execute(
                     """INSERT INTO elo_history
-                       (discord_id, elo_before, elo_after, change, game_id, mode, size, result)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
-                    discord_id, elo_before, new_elo, new_elo - elo_before, game_id, mode, size, result,
+                       (discord_id, elo_before, elo_after, change, game_id, mode, size)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+                    discord_id, elo_before, new_elo, new_elo - elo_before, game_id, mode, size,
                 )
 
     async def apply_penalty(self, discord_id: int):
@@ -431,7 +424,7 @@ class Database:
         return _rows(rows)
 
     async def get_all_active_rooms(self) -> list[_Row]:
-        """Возвращает все активные комнаты (ожидание, заполнена, пик, в игре)."""
+        """Все активные комнаты для отображения в лобби."""
         rows = await self.pool.fetch(
             """SELECT * FROM rooms
                WHERE status IN ('waiting', 'full', 'picking', 'started')

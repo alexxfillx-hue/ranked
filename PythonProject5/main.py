@@ -67,8 +67,11 @@ async def _register_persistent_views():
             message_id=embed_msg_id,
         )
 
-        if status == "waiting":
-            bot.add_view(JoinRoomView(room_id, size, mode, is_full=False))
+        # Регистрируем JoinRoomView для всех активных комнат:
+        # - waiting: кнопка Join активна (is_full=False)
+        # - full/picking/started: кнопка задисейблена (is_full=True), но view нужен для восстановления
+        is_full = status != "waiting"
+        bot.add_view(JoinRoomView(room_id, size, mode, is_full=is_full))
 
         count += 1
 
