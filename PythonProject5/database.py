@@ -193,6 +193,13 @@ class Database:
         )
         return _rows(rows)
 
+    async def get_all_players_ranked(self) -> list[_Row]:
+        """Все игроки отсортированные по ELO — для пагинации лидерборда."""
+        rows = await self.pool.fetch(
+            "SELECT * FROM players ORDER BY elo DESC"
+        )
+        return _rows(rows)
+
     async def update_after_game(
         self,
         discord_id: int,
