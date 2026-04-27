@@ -32,8 +32,8 @@ class Profile(commands.Cog):
 
         if not player:
             await ctx.send(
-                f"{target.mention} ещё не зарегистрирован."
-                + (" Используй `!register`." if target == ctx.author else "")
+                f"{target.mention} is not registered."
+                + (" Use `!register`." if target == ctx.author else "")
             )
             return
 
@@ -61,13 +61,13 @@ class Profile(commands.Cog):
             timeframe = "all"
 
         if timeframe not in TIME_MAP:
-            await ctx.send(f"Допустимые периоды: `day`, `week`, `month`, `all`.")
+            await ctx.send("Valid periods: `day`, `week`, `month`, `all`.")
             return
 
         target = member or ctx.author
         player = await self.bot.db.get_player(target.id)
         if not player:
-            await ctx.send("Игрок не зарегистрирован.")
+            await ctx.send("Player is not registered.")
             return
 
         days = TIME_MAP[timeframe]
@@ -78,14 +78,14 @@ class Profile(commands.Cog):
         history = await self.bot.db.get_elo_history(target.id, since)
 
         if not history:
-            await ctx.send("Нет данных за указанный период.")
+            await ctx.send("No data for the selected period.")
             return
 
         file = await build_elo_chart(history, target.display_name, timeframe)
         if file:
             await ctx.send(file=file)
         else:
-            await ctx.send("Не удалось построить график.")
+            await ctx.send("Failed to build the chart.")
 
 
 async def setup(bot):

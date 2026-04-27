@@ -26,12 +26,12 @@ def _build_leaderboard_embed(players: list, page: int, total_players: int) -> di
         )
 
     embed = discord.Embed(
-        title="🏆  Топ игроков по ELO / Leaderboard",
+        title="🏆  Player Leaderboard",
         description="\n".join(lines),
         color=0xFFD700,
     )
     embed.set_footer(
-        text=f"Страница {page + 1}/{total_pages}  ·  Всего игроков / Total players: {total_players}"
+        text=f"Page {page + 1}/{total_pages}  ·  Total players: {total_players}"
     )
     return embed
 
@@ -94,7 +94,7 @@ class Leaderboard(commands.Cog):
 
         players = await self.bot.db.get_all_players_ranked()
         if not players:
-            await ctx.send("Пока нет зарегистрированных игроков.")
+            await ctx.send("No registered players yet.")
             return
 
         embed = _build_leaderboard_embed(players, page=0, total_players=len(players))
@@ -112,17 +112,17 @@ class Leaderboard(commands.Cog):
             return
 
         if member.id == ctx.author.id:
-            await ctx.send("Нельзя жаловаться на себя.")
+            await ctx.send("You cannot report yourself.")
             return
 
         db = self.bot.db
 
         if await db.reports_today(ctx.author.id) >= 5:
-            await ctx.send("Ты исчерпал лимит жалоб на сегодня (5 штук).")
+            await ctx.send("You have reached the daily report limit (5).")
             return
 
         if await db.already_reported(ctx.author.id, member.id):
-            await ctx.send("Ты уже жаловался на этого игрока.")
+            await ctx.send("You have already reported this player.")
             return
 
         await db.add_report(ctx.author.id, member.id, reason)
@@ -132,13 +132,13 @@ class Leaderboard(commands.Cog):
             ctx.guild.text_channels,
         )
         if admin_channel:
-            embed = discord.Embed(title="🚨 Жалоба", color=0xED4245)
-            embed.add_field(name="От кого", value=f"{ctx.author.mention} (`{ctx.author}`)", inline=True)
-            embed.add_field(name="На кого", value=f"{member.mention} (`{member}`)", inline=True)
-            embed.add_field(name="Причина", value=reason, inline=False)
+            embed = discord.Embed(title="🚨 Report", color=0xED4245)
+            embed.add_field(name="From", value=f"{ctx.author.mention} (`{ctx.author}`)", inline=True)
+            embed.add_field(name="Against", value=f"{member.mention} (`{member}`)", inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
             await admin_channel.send(embed=embed)
 
-        await ctx.send("✅ Жалоба отправлена администрации. Спасибо!", delete_after=10)
+        await ctx.send("✅ Report sent to the administration. Thank you!", delete_after=10)
         try:
             await ctx.message.delete()
         except discord.Forbidden:
@@ -151,8 +151,8 @@ class Leaderboard(commands.Cog):
 
         from config import RANKS
         embed = discord.Embed(
-            title="🏆  Система рангов",
-            description="Список всех рангов и необходимое ELO:",
+            title="🏆  Rank System",
+            description="All ranks and required ELO:",
             color=0xFFD700,
         )
         rank_emojis = ["🥉", "🥉", "🥉", "🥈", "🥈", "🥇", "🥇", "💎", "💠", "👑"]
@@ -160,7 +160,7 @@ class Leaderboard(commands.Cog):
             emoji = rank_emojis[i] if i < len(rank_emojis) else "🔹"
             max_str = str(max_e) if max_e < 99999 else "∞"
             embed.add_field(name=f"{emoji} {name}", value=f"`{min_e}` — `{max_str}` ELO", inline=True)
-        embed.set_footer(text="ELO начисляется за победы в матчах")
+        embed.set_footer(text="ELO is earned by winning matches")
         await ctx.send(embed=embed)
 
     @commands.command(name="plus")
@@ -170,14 +170,14 @@ class Leaderboard(commands.Cog):
         from config import Config as _C
         if not any(r.name == _C.MODERATOR_ROLE_NAME for r in ctx.author.roles) and \
            not ctx.author.guild_permissions.administrator:
-            await ctx.send("❌ Нет прав. Только модераторы могут изменять ELO.")
+            await ctx.send("❌ No permission. Moderators only.")
             return
         if amount <= 0:
-            await ctx.send("❌ Укажи положительное число.")
+            await ctx.send("❌ Please specify a positive number.")
             return
         new_elo = await self.bot.db.mod_adjust_elo(member.id, amount)
         if new_elo == -1:
-            await ctx.send("❌ Игрок не зарегистрирован.")
+            await ctx.send("❌ Player is not registered.")
             return
         from cogs.register import Register
         reg_cog: Register = self.bot.cogs.get("Register")
@@ -194,14 +194,14 @@ class Leaderboard(commands.Cog):
         from config import Config as _C
         if not any(r.name == _C.MODERATOR_ROLE_NAME for r in ctx.author.roles) and \
            not ctx.author.guild_permissions.administrator:
-            await ctx.send("❌ Нет прав. Только модераторы могут изменять ELO.")
+            await ctx.send("❌ No permission. Moderators only.")
             return
         if amount <= 0:
-            await ctx.send("❌ Укажи положительное число.")
+            await ctx.send("❌ Please specify a positive number.")
             return
         new_elo = await self.bot.db.mod_adjust_elo(member.id, -amount)
         if new_elo == -1:
-            await ctx.send("❌ Игрок не зарегистрирован.")
+            await ctx.send("❌ Player is not registered.")
             return
         from cogs.register import Register
         reg_cog: Register = self.bot.cogs.get("Register")
@@ -287,40 +287,64 @@ class Leaderboard(commands.Cog):
         target = member or ctx.author
         player = await self.bot.db.get_player(target.id)
         if not player:
-            await ctx.send(f"{target.mention} не зарегистрирован.")
+            await ctx.send(f"{target.mention} is not registered.")
             return
         history = await self.bot.db.get_elo_history_simple(target.id)
         game_history = [r for r in history if r.get("game_id") is not None]
         if not game_history:
-            await ctx.send(f"У **{player['username']}** пока нет сыгранных игр.")
+            await ctx.send(f"**{player['username']}** has no games played yet.")
             return
-        recent = game_history[-30:]
 
         def get_result(row) -> str:
-            stored = row.get("result")
-            if stored == "win": return "win"
-            if stored in ("lose", "draw"): return "lose"
-            return "win" if row.get("change", 0) > 0 else "lose"
+            """
+            Determine win/draw/loss.
+            - If elo_before > 0 and change == 0  → draw (task 7: not a loss)
+            - If elo_before == 0 and change == 0  → loss
+            - change > 0 → win, change < 0 → loss
+            """
+            ch = row.get("change", 0)
+            elo_before = row.get("elo_before", 0)
+            if ch > 0:
+                return "win"
+            if ch < 0:
+                return "loss"
+            # change == 0
+            if elo_before > 0:
+                return "draw"
+            return "loss"
 
-        icon_map = {"win": "🟢", "lose": "🔴"}
+        # Filter out draws from display (task 7: remove -0 draws from history if elo_before > 0)
+        # We keep them in game_history for total count but skip them in the streak icons
+        displayable = [r for r in game_history if get_result(r) != "draw"]
+
+        icon_map = {"win": "🟢", "loss": "🔴", "draw": "🟡"}
         icons = [icon_map[get_result(r)] for r in game_history[-50:]]
         streak_line = "".join(icons)
+
         current_result = get_result(game_history[-1])
         streak_count = 0
         for r in reversed(game_history):
-            if get_result(r) == current_result: streak_count += 1
-            else: break
-        streak_labels = {"win": f"🔥 {streak_count} побед подряд", "lose": f"❄️ {streak_count} поражений подряд"}
+            if get_result(r) == current_result:
+                streak_count += 1
+            else:
+                break
+
+        streak_labels = {
+            "win":  f"🔥 {streak_count} win streak",
+            "loss": f"❄️ {streak_count} loss streak",
+            "draw": f"🤝 {streak_count} draw streak",
+        }
         streak_label = streak_labels[current_result]
 
         mode_labels = {"team": "👥 team", "random": "🎲 rand", "cap": "🎯 cap", None: "❓"}
+        recent = game_history[-30:]
         detail_lines = []
         for r in reversed(recent):
             res = get_result(r)
             icon = icon_map[res]
             ch = r.get("change", 0)
             sign = "+" if ch > 0 else ""
-            elo_str = f"{sign}{ch}" if ch != 0 else "-0"
+            elo_str = f"{sign}{ch}" if ch != 0 else "±0"
             size = r.get("size")
             mode = r.get("mode")
             mode_label = mode_labels.get(mode, "❓")
@@ -329,18 +353,110 @@ class Leaderboard(commands.Cog):
             detail_lines.append(f"{icon} `{fmt} {mode_label}` {elo_str} ELO → **{elo_after}**")
 
         total = len(game_history)
-        wins = sum(1 for r in game_history if get_result(r) == "win")
-        losses = total - wins
+        wins   = sum(1 for r in game_history if get_result(r) == "win")
+        losses = sum(1 for r in game_history if get_result(r) == "loss")
+        draws  = sum(1 for r in game_history if get_result(r) == "draw")
         wr = round(wins / total * 100) if total else 0
 
-        embed = discord.Embed(title=f"📊  История игр — {player['username']}", color=0x5865F2)
-        embed.add_field(name=f"Последние {min(50, total)} игр  (🟢 победа  🔴 поражение)", value=streak_line or "—", inline=False)
+        embed = discord.Embed(title=f"📊  Game History — {player['username']}", color=0x5865F2)
+        embed.add_field(
+            name=f"Last {min(50, total)} games  (🟢 win  🔴 loss  🟡 draw)",
+            value=streak_line or "—",
+            inline=False,
+        )
         chunk = "\n".join(detail_lines[:15])
-        embed.add_field(name="Последние игры (детально)", value=chunk or "—", inline=False)
-        embed.add_field(name="Текущая серия", value=streak_label, inline=True)
-        embed.add_field(name="Всего игр", value=str(total), inline=True)
-        embed.add_field(name="В / П", value=f"{wins} / {losses}", inline=True)
-        embed.add_field(name="Винрейт", value=f"{wr}%", inline=True)
+        embed.add_field(name="Recent games (detailed)", value=chunk or "—", inline=False)
+        embed.add_field(name="Current streak", value=streak_label, inline=True)
+        embed.add_field(name="Total games", value=str(total), inline=True)
+        embed.add_field(name="W / L / D", value=f"{wins} / {losses} / {draws}", inline=True)
+        embed.add_field(name="Winrate", value=f"{wr}%", inline=True)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="eloinfo")
+    async def eloinfo(self, ctx: commands.Context):
+        """Explains how ELO is gained and lost in each mode and format."""
+        if not self._is_guild(ctx):
+            return
+
+        embed = discord.Embed(
+            title="📊  ELO System — How it works",
+            color=0xFFD700,
+        )
+
+        embed.add_field(
+            name="🏆 Base ELO by rating zone",
+            value=(
+                "```\n"
+                "ELO range   │  Win   │  Loss\n"
+                "────────────┼────────┼──────\n"
+                "   0 – 300  │  +7    │  -3\n"
+                " 301 – 600  │  +5    │  -4\n"
+                " 601 – 800  │  +3    │  -5\n"
+                " 801 – 1000 │  +2    │  -6\n"
+                "  1001+     │  +2    │  -6\n"
+                "```"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="⚙️ Format multiplier",
+            value=(
+                "```\n"
+                "Format  │ Multiplier\n"
+                "────────┼───────────\n"
+                "  1v1   │  × 0.7\n"
+                "  2v2   │  × 1.0\n"
+                "  3v3   │  × 1.05\n"
+                "  4v4   │  × 1.2\n"
+                "```"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="👥 Mode modifier — Team mode",
+            value=(
+                "In **team** mode the final ELO change is multiplied by **× 0.7** "
+                "(reduced because players self-organize their teams).\n"
+                "Minimum: **+1** per win, **-1** per loss (capped at -7)."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🎲 Random / 🎯 Cap modes",
+            value=(
+                "No mode penalty. Formula: `base × format_mult`.\n"
+                "Minimum: **+1** per win, **-1** per loss (capped at **-7**)."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="⚠️ Penalty games",
+            value=(
+                "If you have **penalty games** active:\n"
+                "• Win ELO is halved (`÷ 2`).\n"
+                "• Loss ELO is doubled (`× 2`).\n"
+                "Penalty is removed after completing the penalised games."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🛡️ ELO floor",
+            value="Your ELO can never drop below **0**. If you're at 0 and lose, you stay at 0.",
+            inline=False,
+        )
+        embed.add_field(
+            name="📖 Example — 4v4 Cap, ELO 350",
+            value=(
+                "Base (win, zone 301-600): **+5**\n"
+                "Format (4v4): × 1.2 → **+6**\n"
+                "Mode (cap): no penalty → **+6 ELO**\n\n"
+                "Base (loss, zone 301-600): **-4**\n"
+                "Format (4v4): × 1.2 → **-4.8 → -5**\n"
+                "Mode (cap): no penalty → **-5 ELO**"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Use !elo [day/week/month/all] to see your ELO chart.")
         await ctx.send(embed=embed)
 
     @commands.command(name="stat")
@@ -350,34 +466,34 @@ class Leaderboard(commands.Cog):
         target = member or ctx.author
         player = await self.bot.db.get_player(target.id)
         if not player:
-            await ctx.send(f"{target.mention} не зарегистрирован.")
+            await ctx.send(f"{target.mention} is not registered.")
             return
         rows = await self.bot.db.get_stat_vs_players(target.id)
         if not rows:
-            await ctx.send(f"У **{player['username']}** пока нет статистики против других игроков.")
+            await ctx.send(f"**{player['username']}** has no match-up stats yet.")
             return
 
-        embed = discord.Embed(title=f"⚔️  Статистика — {player['username']}", color=0xE67E22)
+        embed = discord.Embed(title=f"⚔️  Stats — {player['username']}", color=0xE67E22)
         top_wins = [r for r in rows if r["wins"] > 0][:5]
         if top_wins:
             lines = []
             for r in top_wins:
                 wr = round(r["wins"] / r["total"] * 100) if r["total"] else 0
-                lines.append(f"• **{r['username']}** — {r['wins']}В / {r['losses']}П / {r['draws']}Н  (WR {wr}%)")
-            embed.add_field(name="🏆 Больше всего побед против", value="\n".join(lines), inline=False)
+                lines.append(f"• **{r['username']}** — {r['wins']}W / {r['losses']}L / {r['draws']}D  (WR {wr}%)")
+            embed.add_field(name="🏆 Most wins against", value="\n".join(lines), inline=False)
         top_losses = sorted(rows, key=lambda r: r["losses"], reverse=True)
         top_losses = [r for r in top_losses if r["losses"] > 0][:5]
         if top_losses:
             lines = []
             for r in top_losses:
                 wr = round(r["wins"] / r["total"] * 100) if r["total"] else 0
-                lines.append(f"• **{r['username']}** — {r['wins']}В / {r['losses']}П / {r['draws']}Н  (WR {wr}%)")
-            embed.add_field(name="💀 Больше всего поражений против", value="\n".join(lines), inline=False)
+                lines.append(f"• **{r['username']}** — {r['wins']}W / {r['losses']}L / {r['draws']}D  (WR {wr}%)")
+            embed.add_field(name="💀 Most losses against", value="\n".join(lines), inline=False)
         top_played = sorted(rows, key=lambda r: r["total"], reverse=True)[:3]
         if top_played:
-            lines = [f"• **{r['username']}** — {r['total']} игр вместе" for r in top_played]
-            embed.add_field(name="🎮 Чаще всего встречался с", value="\n".join(lines), inline=False)
-        embed.set_footer(text=f"Всего уникальных соперников: {len(rows)}")
+            lines = [f"• **{r['username']}** — {r['total']} games together" for r in top_played]
+            embed.add_field(name="🎮 Most frequent opponents", value="\n".join(lines), inline=False)
+        embed.set_footer(text=f"Total unique opponents: {len(rows)}")
         await ctx.send(embed=embed)
 
 

@@ -621,9 +621,9 @@ class VoteEndView(discord.ui.View):
 
 class VoteButton(discord.ui.Button):
     STYLES = {
-        "win": (discord.ButtonStyle.success, "🏆 Победа"),
-        "draw": (discord.ButtonStyle.secondary, "🤝 Ничья"),
-        "lose": (discord.ButtonStyle.danger, "💀 Поражение"),
+        "win":  (discord.ButtonStyle.success, "🏆 Win"),
+        "draw": (discord.ButtonStyle.secondary, "🤝 Draw"),
+        "lose": (discord.ButtonStyle.danger, "💀 Loss"),
     }
 
     def __init__(self, vote: str, room_id: int):
@@ -1438,10 +1438,10 @@ class Rooms(commands.Cog):
         await db.set_player_team(room_id, cap2["discord_id"], 2)
         await db.set_captain(room_id, cap2["discord_id"], True)
 
-        first_pick_team = random.choice([1, 2])
+        first_pick_team = 1  # Team 1 always picks first
+        # Strong side always goes to the team that picks SECOND
+        second_pick_team_r = 2
         await db.set_pick_turn(room_id, first_pick_team)
-        # Сильная сторона — тот кто пикует ВТОРЫМ
-        second_pick_team_r = 2 if first_pick_team == 1 else 1
         await db.set_strong_side(room_id, second_pick_team_r)
         await db.update_room_status(room_id, "picking")
         await self._refresh_lobby()
@@ -1449,14 +1449,14 @@ class Rooms(commands.Cog):
         if channel:
             first_cap = cap1 if first_pick_team == 1 else cap2
             second_cap = cap2 if first_pick_team == 1 else cap1
-            strong_side = "🔵 Команда 1" if second_pick_team_r == 1 else "🔴 Команда 2"
+            strong_side = "🔵 Team 1" if second_pick_team_r == 1 else "🔴 Team 2"
             embed = discord.Embed(
-                title="🎯 Капитанский пик начался!",
+                title="🎯 Captain pick started!",
                 description=(
-                    f"👑 Капитан команды 1: <@{cap1['discord_id']}>\n"
-                    f"👑 Капитан команды 2: <@{cap2['discord_id']}>\n\n"
-                    f"**Первым пикует: <@{first_cap['discord_id']}>** (Команда {first_pick_team})\n\n"
-                    f"⚔️ **Сильная сторона: {strong_side}** (пикует вторым — <@{second_cap['discord_id']}>)"
+                    f"👑 Captain Team 1: <@{cap1['discord_id']}>\n"
+                    f"👑 Captain Team 2: <@{cap2['discord_id']}>\n\n"
+                    f"**First pick: <@{first_cap['discord_id']}>** (Team {first_pick_team})\n\n"
+                    f"⚔️ **Strong side: {strong_side}** (picks second — <@{second_cap['discord_id']}>)"
                 ),
                 color=0xE67E22,
             )
@@ -2136,24 +2136,24 @@ class Rooms(commands.Cog):
                                 "затем попробуйте снова."
                             )
                         return
-                    first_pick_team = random.choice([1, 2])
-                    second_pick_team = 2 if first_pick_team == 1 else 1
+                    first_pick_team = 1  # Team 1 always picks first
+                    second_pick_team = 2
                     await db.set_pick_turn(room_id, first_pick_team)
-                    # Сильная сторона — тот кто пикует ВТОРЫМ (компенсация за выбор последним)
+                    # Strong side always goes to the team that picks SECOND
                     await db.set_strong_side(room_id, second_pick_team)
                     await db.update_room_status(room_id, "picking")
                     await self._refresh_lobby()
                     first_cap = cap1 if first_pick_team == 1 else cap2
                     second_cap = cap2 if first_pick_team == 1 else cap1
                     if room_channel:
-                        strong_side = "🔵 Команда 1" if second_pick_team == 1 else "🔴 Команда 2"
+                        strong_side = "🔵 Team 1" if second_pick_team == 1 else "🔴 Team 2"
                         strong_embed = discord.Embed(
-                            title="🎯 Капитанский пик начался!",
+                            title="🎯 Captain pick started!",
                             description=(
-                                f"👑 Капитан команды 1: <@{cap1['discord_id']}>\n"
-                                f"👑 Капитан команды 2: <@{cap2['discord_id']}>\n\n"
-                                f"**Первым пикует: <@{first_cap['discord_id']}>** (Команда {first_pick_team})\n\n"
-                                f"⚔️ **Сильная сторона: {strong_side}** (пикует вторым — <@{second_cap['discord_id']}>)"
+                                f"👑 Captain Team 1: <@{cap1['discord_id']}>\n"
+                                f"👑 Captain Team 2: <@{cap2['discord_id']}>\n\n"
+                                f"**First pick: <@{first_cap['discord_id']}>** (Team {first_pick_team})\n\n"
+                                f"⚔️ **Strong side: {strong_side}** (picks second — <@{second_cap['discord_id']}>)"
                             ),
                             color=0xE67E22,
                         )
@@ -2183,21 +2183,24 @@ class Rooms(commands.Cog):
             await self._refresh_lobby()
     
             if room_channel:
-                # Объявляем сильную сторону сразу при старте
-                strong = random.choice(["🔵 Команда 1 / Team 1", "🔴 Команда 2 / Team 2"])
-                strong_embed = discord.Embed(
-                    title="⚔️ СИЛЬНАЯ СТОРОНА / STRONG SIDE",
-                    description=f"**{strong}** — сильная сторона!\n**{strong}** — strong side!",
-                )
-                await room_channel.send(embed=strong_embed)
-    
+                # Strong side is already set for cap mode; for team/random we skip it here
+                # (it was announced during pick / room fill)
                 mentions = " ".join(f"<@{p['discord_id']}>" for p in players)
+                caps = [p for p in players if p["is_captain"]]
+                cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
+
                 if room["mode"] == "team":
-                    screenshot_note = "📸 **По окончании игры** любой игрок должен прислать скриншот результата прямо в этот канал.\n\nПосле этого **минимум по одному игроку с каждой команды** должны нажать кнопку результата."
+                    screenshot_note = (
+                        "📸 **When the game ends**, any player must send a screenshot of the result in this channel.\n\n"
+                        "After that, **at least one player from each team** must press the result button."
+                    )
                 else:
-                    screenshot_note = "📸 **По окончании игры** капитан должен прислать скриншот результата прямо в этот канал.\n\nПосле получения скриншота появятся кнопки **Победа / Ничья / Поражение**."
+                    screenshot_note = (
+                        f"📸 **When the game ends**, {cap_mentions} — please send a screenshot of the result in this channel.\n\n"
+                        "After the screenshot is received, the **Win / Draw / Loss** buttons will appear."
+                    )
                 start_embed = discord.Embed(
-                    title="🚀 ИГРА НАЧАЛАСЬ!",
+                    title="🚀 GAME STARTED!",
                     description=f"{mentions}\n\n{screenshot_note}",
                     color=0x57F287,
                 )
@@ -2533,24 +2536,27 @@ class Rooms(commands.Cog):
                     files=files,
                 )
 
-            if room["mode"] == "team":
-                vote_desc = (
-                    f"Скрин от {message.author.mention} принят.\n\n"
-                    "**Минимум по одному игроку с каждой команды** должны нажать кнопку результата:\n"
-                    "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**"
-                )
-            else:
-                vote_desc = (
-                    f"Скрин от {message.author.mention} принят.\n\n"
-                    "Капитаны — нажмите кнопку с вашим результатом:\n"
-                    "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**"
-                )
-            vote_embed = discord.Embed(
-                title="📸 Скриншот получен! Голосуйте за результат",
-                description=vote_desc,
-                color=0xF1C40F,
+        caps = [p for p in players if p["is_captain"]]
+        cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
+
+        if room["mode"] == "team":
+            vote_desc = (
+                f"Screenshot from {message.author.mention} accepted.\n\n"
+                "**At least one player from each team** must press the result button:\n"
+                "**(🏆 Win + 💀 Loss)** or **(🤝 Draw + 🤝 Draw)**"
             )
-            await message.channel.send(embed=vote_embed, view=VoteEndView(room_id))
+        else:
+            vote_desc = (
+                f"Screenshot from {message.author.mention} accepted.\n\n"
+                f"{cap_mentions} — press the button with your result:\n"
+                "**(🏆 Win + 💀 Loss)** or **(🤝 Draw + 🤝 Draw)**"
+            )
+        vote_embed = discord.Embed(
+            title="📸 Screenshot received! Vote for the result",
+            description=vote_desc,
+            color=0xF1C40F,
+        )
+        await message.channel.send(embed=vote_embed, view=VoteEndView(room_id))
 
     # ── Таймаут игры ──────────────────────────────────────────────
 
@@ -2733,6 +2739,51 @@ class Rooms(commands.Cog):
         await db.delete_room(room_id)
         await ctx.send(f"✅ Комната #{room_id} расформирована.")
         await self._refresh_lobby()
+
+    @commands.command(name="delete")
+    async def delete_room(self, ctx: commands.Context, room_id: int = None):
+        """[Mod] Force-delete a room and remove all players. Usage: !delete <room_id>"""
+        if not self._is_guild(ctx):
+            return
+        if not self._is_mod(ctx.author):
+            await ctx.send("❌ No permission. Moderators only.")
+            return
+        if room_id is None:
+            await ctx.send("Usage: `!delete <room_id>`  e.g. `!delete 19`")
+            return
+
+        db = self.bot.db
+        room = await db.get_room(room_id)
+        if not room:
+            await ctx.send(f"❌ Room #{room_id} not found.")
+            return
+
+        guild = ctx.guild
+        channel = guild.get_channel(room["channel_id"])
+
+        # Remove all players from the room (deny channel access)
+        players = await db.get_room_players(room_id)
+        for p in players:
+            member = guild.get_member(p["discord_id"])
+            if member and channel:
+                try:
+                    await self._deny_channel(channel, member)
+                except Exception:
+                    pass
+
+        # Delete the Discord channel
+        if channel:
+            try:
+                await channel.send(f"🔨 [Mod] Room deleted by {ctx.author.mention}.")
+                await asyncio.sleep(2)
+                await channel.delete(reason=f"Deleted by mod {ctx.author}")
+            except (discord.Forbidden, discord.NotFound):
+                pass
+
+        # Remove from database
+        await db.delete_room(room_id)
+        await self._refresh_lobby()
+        await ctx.send(f"✅ Room **#{room_id}** deleted. {len(players)} player(s) removed.")
 
     @commands.command(name="mod_captain")
     async def mod_captain(self, ctx: commands.Context, member: discord.Member = None):
