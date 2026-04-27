@@ -170,7 +170,7 @@ class JoinButton(discord.ui.Button):
     def __init__(self, room_id: int, size: int, mode: str, is_full: bool):
         if is_full:
             super().__init__(
-                label="Комната полная",
+                label="🔒 Full / Заполнена",
                 style=discord.ButtonStyle.secondary,
                 emoji="🔴",
                 disabled=True,
@@ -178,7 +178,7 @@ class JoinButton(discord.ui.Button):
             )
         else:
             super().__init__(
-                label="Присоединиться",
+                label="Join / Войти",
                 style=discord.ButtonStyle.success,
                 emoji="🎮",
                 custom_id=f"join_room_{room_id}",
@@ -285,7 +285,7 @@ class JoinRoomView(discord.ui.View):
 class ExitButton(discord.ui.Button):
     def __init__(self, room_id: int):
         super().__init__(
-            label="Покинуть",
+            label="Leave / Покинуть",
             style=discord.ButtonStyle.danger,
             emoji="🚪",
             custom_id=f"exit_room_{room_id}",
@@ -379,7 +379,7 @@ class ExitButton(discord.ui.Button):
 class ReadyButton(discord.ui.Button):
     def __init__(self, team: int, room_id: int):
         super().__init__(
-            label=f"✅ Команда {team} Ready",
+            label=f"✅ Team {team} Ready / Команда {team} Готова",
             style=discord.ButtonStyle.success,
             custom_id=f"ready_t{team}_{room_id}",
             row=0,
@@ -431,7 +431,7 @@ class PickTeamButton(discord.ui.Button):
 
     def __init__(self, team: int, room_id: int):
         super().__init__(
-            label=f"🔵 Команда {team}" if team == 1 else f"🔴 Команда {team}",
+            label=f"🔵 Team {team} / Команда {team}" if team == 1 else f"🔴 Team {team} / Команда {team}",
             style=discord.ButtonStyle.primary if team == 1 else discord.ButtonStyle.danger,
             custom_id=f"pickteam_{team}_{room_id}",
             row=0,
@@ -621,7 +621,7 @@ class ReportRoomButton(discord.ui.Button):
 
     def __init__(self, room_id: int, row: int = 2):
         super().__init__(
-            label="Вызвать админа",
+            label="Call Admin / Вызвать админа",
             style=discord.ButtonStyle.danger,
             emoji="🚨",
             custom_id=f"report_room_{room_id}",
@@ -844,7 +844,7 @@ class Rooms(commands.Cog):
 
         lobby = await self._get_or_create_lobby_channel(guild)
         db = self.bot.db
-        all_rooms = await db.get_open_rooms()
+        all_rooms = await db.get_all_active_rooms()
 
         # Удаляем старые сообщения бота по одному (не требует Manage Messages)
         try:
@@ -859,33 +859,39 @@ class Rooms(commands.Cog):
 
         if not all_rooms:
             embed = discord.Embed(
-                title="🎮 Открытые комнаты",
+                title="🎮 Open Rooms / Открытые комнаты",
                 description=(
-                    "Сейчас нет открытых игр.\n\n"
-                    "Создай свою:\n"
-                    "`!create 4 random` · `!create 4 team` · `!create 4 cap`"
+                    "No open games right now. / Сейчас нет открытых игр.\n\n"
+                    "Create your own: `!create`"
                 ),
                 color=0x2C2F33,
             )
-            embed.set_footer(text="Обновляется автоматически")
+            embed.set_footer(text="Auto-updated / Обновляется автоматически")
             await lobby.send(embed=embed)
             return
 
         header = discord.Embed(
-            title="🎮 Открытые комнаты",
+            title="🎮 Open Rooms / Открытые комнаты",
             description=(
-                "Нажми `!q <размер> <режим>` чтобы войти в игру.\n"
-                "Пример: `!q 4 random` · `!q 3 cap` · `!q 2 team`"
+                "Press **Join / Войти** or type `!q <size> <mode>` to join.\n"
+                "Create your own: `!create`"
             ),
             color=0x5865F2,
         )
-        header.set_footer(text="Обновляется автоматически при изменениях")
+        header.set_footer(text="Auto-updated / Обновляется автоматически")
         await lobby.send(embed=header)
 
         mode_labels = {
-            "team": ("👥 Командный", 0x5865F2),
-            "random": ("🎲 Рандомный", 0x9B59B6),
-            "cap": ("🎯 Капитанский пик", 0xE67E22),
+            "team": ("👥 Team / Командный", 0x5865F2),
+            "random": ("🎲 Random / Рандомный", 0x9B59B6),
+            "cap": ("🎯 Captain Pick / Капитанский пик", 0xE67E22),
+        }
+
+        status_labels = {
+            "waiting":  ("🟢", "Open / Открыта"),
+            "full":     ("🟡", "Full / Заполнена"),
+            "picking":  ("🟠", "Picking / Пик капитанов"),
+            "started":  ("🔴", "In Game / В игре"),
         }
 
         for room in all_rooms:
@@ -893,12 +899,17 @@ class Rooms(commands.Cog):
             total_slots = room["size"] * 2
             filled = len(players)
             free = total_slots - filled
+            room_status = room["status"]
 
             mode_label, color = mode_labels.get(room["mode"], ("❓", 0x99AAB5))
-            status_line = f"{'🟢' if free > 0 else '🔴'} {filled}/{total_slots} игроков"
+            status_icon, status_text = status_labels.get(room_status, ("⚪", room_status))
+
+            # Dim color for in-progress rooms
+            if room_status in ("started", "picking"):
+                color = 0x36393F
 
             embed = discord.Embed(
-                title=f"Комната #{room['room_id']}  ·  {room['size']}v{room['size']}  ·  {mode_label}",
+                title=f"Room / Комната #{room['room_id']}  ·  {room['size']}v{room['size']}  ·  {mode_label}",
                 color=color,
             )
 
@@ -907,21 +918,23 @@ class Rooms(commands.Cog):
                 for p in players:
                     rank, _ = get_rank(p["elo"])
                     lines.append(f"• **{p['username']}** — {p['elo']} ELO ({rank})")
-                embed.add_field(name="Игроки", value="\n".join(lines), inline=True)
+                embed.add_field(name="Players / Игроки", value="\n".join(lines), inline=True)
 
-            if free > 0:
+            if free > 0 and room_status == "waiting":
                 embed.add_field(
-                    name="Свободно",
-                    value="\n".join(["• *Место свободно*"] * free),
+                    name="Free / Свободно",
+                    value="\n".join(["• *Open slot / Место свободно*"] * free),
                     inline=True,
                 )
 
-            embed.set_footer(text=f"{status_line}  ·  !q {room['size']} {room['mode']}")
+            embed.set_footer(text=f"{status_icon} {status_text}  ·  {filled}/{total_slots} players  ·  !q {room['size']} {room['mode']}")
+
+            is_joinable = (room_status == "waiting" and free > 0)
             view = JoinRoomView(
                 room_id=room["room_id"],
                 size=room["size"],
                 mode=room["mode"],
-                is_full=(free == 0),
+                is_full=(not is_joinable),
             )
             await lobby.send(embed=embed, view=view)
 
