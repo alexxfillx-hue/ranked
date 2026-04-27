@@ -430,6 +430,15 @@ class Database:
         )
         return _rows(rows)
 
+    async def get_all_active_rooms(self) -> list[_Row]:
+        """Возвращает все активные комнаты (ожидание, заполнена, пик, в игре)."""
+        rows = await self.pool.fetch(
+            """SELECT * FROM rooms
+               WHERE status IN ('waiting', 'full', 'picking', 'started')
+               ORDER BY created_at ASC"""
+        )
+        return _rows(rows)
+
     async def get_available_rooms(
         self, size: int | None = None, mode: str | None = None
     ) -> list[_Row]:
