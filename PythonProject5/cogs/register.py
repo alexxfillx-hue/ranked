@@ -131,26 +131,50 @@ class Register(commands.Cog):
     async def _sync_rank_role(self, member: discord.Member, elo: int):
         guild = member.guild
         rank_name, _ = get_rank(elo)
+
+        # Получаем свежий список ролей сервера (не из кэша)
+        try:
+            await guild.fetch_roles()
+        except Exception:
+            pass
+
+        # Строим карту role_name → роль с нормализацией пробелов/регистра
+        role_map: dict[str, discord.Role] = {}
+        for role in guild.roles:
+            role_map[role.name] = role
+            role_map[role.name.strip()] = role
+
+        to_add: discord.Role | None = None
+        to_remove: list[discord.Role] = []
+
         for _, _, name, _, role_name in RANKS:
-            role = discord.utils.get(guild.roles, name=role_name)
+            role = role_map.get(role_name) or role_map.get(role_name.strip())
             if role is None:
+                import logging
+                logging.getLogger("bot").warning(
+                    f"_sync_rank_role: роль '{role_name}' не найдена на сервере {guild.name}. "
+                    f"Доступные роли: {[r.name for r in guild.roles]}"
+                )
                 continue
             if name == rank_name:
                 if role not in member.roles:
-                    try:
-                        await member.add_roles(role, reason=f"ELO {elo} → {rank_name}")
-                    except discord.Forbidden:
-                        pass
-                    except discord.HTTPException:
-                        pass
+                    to_add = role
             else:
                 if role in member.roles:
-                    try:
-                        await member.remove_roles(role, reason="ELO rank update")
-                    except discord.Forbidden:
-                        pass
-                    except discord.HTTPException:
-                        pass
+                    to_remove.append(role)
+
+        # Сначала снимаем старые ранговые роли, потом выдаём новую
+        if to_remove:
+            try:
+                await member.remove_roles(*to_remove, reason="ELO rank update")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+        if to_add:
+            try:
+                await member.add_roles(to_add, reason=f"ELO {elo} → {rank_name}")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
     async def _get_lang(self, discord_id: int) -> str:
         return await self.bot.db.get_lang(discord_id)
@@ -235,12 +259,39 @@ class Register(commands.Cog):
         """[Админ] Проверить существуют ли ранговые роли на сервере."""
         if not self._guild_check(ctx):
             return
+
+        # Принудительно обновляем кэш ролей
+        try:
+            await ctx.guild.fetch_roles()
+        except Exception:
+            pass
+
+        guild_role_names = {r.name: r for r in ctx.guild.roles}
+
         lines = []
         for _, _, name, _, role_name in RANKS:
-            role = discord.utils.get(ctx.guild.roles, name=role_name)
-            status = f"✅ найдена (id:{role.id})" if role else "❌ НЕ НАЙДЕНА"
+            role = guild_role_names.get(role_name)
+            if role:
+                status = f"✅ найдена (id:{role.id})"
+            else:
+                # Ищем похожие роли для диагностики
+                similar = [r for r in ctx.guild.roles if role_name.lower()[:6] in r.name.lower()]
+                hint = f" | похожие: {[r.name for r in similar[:3]]}" if similar else ""
+                status = f"❌ НЕ НАЙДЕНА{hint} | в конфиге: {repr(role_name)}"
             lines.append(f"`{role_name}` — {status}")
-        embed = discord.Embed(title="🔍 Диагностика ранговых ролей", description="\n".join(lines), color=0x5865F2)
+
+        # Также выводим все роли сервера для сравнения
+        all_roles_preview = ", ".join(repr(r.name) for r in ctx.guild.roles if r.name != "@everyone")
+        embed = discord.Embed(
+            title="🔍 Диагностика ранговых ролей",
+            description="\n".join(lines),
+            color=0x5865F2,
+        )
+        embed.add_field(
+            name="Все роли сервера (repr)",
+            value=all_roles_preview[:1000] or "—",
+            inline=False,
+        )
         await ctx.send(embed=embed)
 
     @commands.command(name="fix_role")
