@@ -807,6 +807,9 @@ class Rooms(commands.Cog):
         # asyncio.Lock на каждую комнату — гарантирует что финализация
         # не запустится дважды даже при одновременных нажатиях кнопок
         self._finalize_locks: dict[int, asyncio.Lock] = {}
+        # Хранит URL последнего скрина для каждой комнаты (даже отклонённых OCR)
+        # Используется чтобы показать скрин при голосовании когда OCR отклонил
+        self._last_screenshot_url: dict[int, str] = {}
 
     def cog_unload(self):
         self.game_timeout_loop.cancel()
@@ -1554,29 +1557,7 @@ class Rooms(commands.Cog):
             embed.add_field(name="🔵 Команда 1", value=t1_mentions, inline=False)
             embed.add_field(name="🔴 Команда 2", value=t2_mentions, inline=False)
             await channel.send(embed=embed)
-
-            # Объявляем сильную сторону: команда 2 всегда сильная (она пикала второй)
-            strong_side_team = room["strong_side"] if room and room["strong_side"] else 2
-            strong_label = "🔵 Команда 1" if strong_side_team == 1 else "🔴 Команда 2"
-            strong_embed = discord.Embed(
-                title="⚔️ Распределение сторон",
-                description=(
-                    f"**{strong_label}** играет за **СИЛЬНУЮ СТОРОНУ**!\n\n"
-                    "*(Команда чей капитан пикал вторым играет за сильную — "
-                    "так как первый пик является преимуществом)*\n\n"
-                    "Удачи всем участникам!"
-                ),
-                color=0xE67E22,
-            )
-            await channel.send(embed=strong_embed)
-
-            # Кнопка Start прямо здесь чтобы капитанам не листать вверх
-            start_view = discord.ui.View(timeout=None)
-            start_view.add_item(StartButton(room_id))
-            await channel.send(
-                "✅ Капитаны, нажмите **▶ Start** чтобы начать!",
-                view=start_view,
-            )
+            await channel.send("✅ Капитаны, нажмите **▶ Start** чтобы начать!")
 
         await self._refresh_room_embed(room_id)
 
@@ -2357,8 +2338,9 @@ class Rooms(commands.Cog):
         if not await db.try_finalize_room(room_id):
             return
 
-        # Чистим lock после завершения (комната удаляется, lock больше не нужен)
+        # Чистим lock и last_screenshot_url после завершения
         self._finalize_locks.pop(room_id, None)
+        self._last_screenshot_url.pop(room_id, None)
 
         team1 = [p for p in players if p["team"] == 1]
         team2 = [p for p in players if p["team"] == 2]
@@ -2505,14 +2487,18 @@ class Rooms(commands.Cog):
         )
 
         # Пересылаем скриншоты в канал результатов
+        last_url = self._last_screenshot_url.get(room_id)
         if channel and screenshots:
             for ss in screenshots:
                 team_label = "🔵 Команда 1" if ss["team"] == 1 else "🔴 Команда 2"
-                # Ищем оригинальное сообщение со скрином в канале комнаты
-                # (они уже в истории канала — просто сообщаем об этом)
-            await results_channel.send(
-                f"📸 Скриншоты матча **#{room_id}** были загружены капитанами в канале комнаты."
-            )
+            if last_url:
+                await results_channel.send(
+                    f"📸 Скриншоты матча **#{room_id}** · {last_url}"
+                )
+            else:
+                await results_channel.send(
+                    f"📸 Скриншоты матча **#{room_id}** были загружены участниками в канале комнаты."
+                )
 
         if channel:
             await asyncio.sleep(10)
@@ -2586,28 +2572,36 @@ class Rooms(commands.Cog):
             except Exception as _ocr_err:
                 log.warning("OCR analysis failed: %s", _ocr_err)
 
+        # Всегда сохраняем URL последнего скрина — нужен при ручном голосовании
+        if image_attachments:
+            self._last_screenshot_url[room_id] = image_attachments[0].url
+
         # Case 1: screenshot failed validation (wrong players / wrong format)
-        # Do NOT react with checkmark, do NOT save, do NOT forward to match-results.
+        # Do NOT react with checkmark, do NOT save to screenshots DB...
+        # BUT: сохраняем скрин чтобы разрешить ручное голосование.
         if ocr_result is not None and ValidationError is not None and isinstance(ocr_result, ValidationError):
             val_err = ocr_result  # ValidationError
             size = room["size"]
             team1_nicks = ", ".join(f"**{p['username']}**" for p in players if p["team"] == 1)
             team2_nicks = ", ".join(f"**{p['username']}**" for p in players if p["team"] == 2)
 
+            # Сохраняем скрин в БД — иначе голосование будет заблокировано
+            await db.add_screenshot(room_id, my_team, message.author.id)
+            await message.add_reaction("❓")
+
             reject_embed = discord.Embed(
-                title="⚠️ Скриншот не соответствует этому матчу",
+                title="⚠️ Скриншот не распознан автоматически",
                 description=(
-                    f"🤖 OCR проверил скриншот и не нашёл игроков этой комнаты.\n\n"
+                    f"🤖 OCR не смог подтвердить игроков этой комнаты.\n\n"
                     f"**Причина:** {val_err.reason}\n\n"
                     f"**Ожидались игроки ({size}v{size}):**\n"
                     f"🔵 Команда 1: {team1_nicks}\n"
                     f"🔴 Команда 2: {team2_nicks}\n\n"
-                    f"Загрузи скриншот **таблицы результатов именно этой игры**.\n"
-                    f"Если уверен что скрин верный — проголосуйте вручную кнопками ниже."
+                    f"Если скрин верный — **проголосуйте вручную кнопками ниже**.\n"
+                    f"Если скрин неверный — загрузи правильный скрин таблицы результатов."
                 ),
                 color=0xED4245,
             )
-            await message.add_reaction("❌")
             await message.channel.send(embed=reject_embed, view=VoteEndView(room_id))
             return
 
