@@ -1,23 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import datetime
-import json
-import logging
-import os
 import random
 from typing import Optional
 
-import aiohttp
 import discord
 from discord.ext import commands, tasks
 
 from config import Config, get_rank
 from utils.elo import calculate_elo, team_avg
 from utils.embeds import room_embed
-
-log = logging.getLogger("bot.rooms")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -613,7 +606,6 @@ class PickTeamButton(discord.ui.Button):
             await rooms_cog._refresh_room_embed(self.room_id)
 
         await interaction.response.send_message(f"✅ Ты в Команде {self.team}!", ephemeral=True)
-
 
 
 class VoteEndView(discord.ui.View):
@@ -2489,106 +2481,16 @@ class Rooms(commands.Cog):
             await asyncio.sleep(10)
             await channel.delete(reason="Игра завершена")
 
-    # ── Claude Vision helper ──────────────────────────────────────
-
-    async def _analyze_screenshot(
-        self, image_bytes: bytes, content_type: str, players: list
-    ) -> dict | None:
-        """
-        Отправляет скрин в Claude Vision API.
-        Возвращает dict {"team1_result": "win"|"lose"|"draw", "score": "2:1", "confidence": "high"|"low"}
-        или None если анализ не удался.
-        """
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            log.warning("ANTHROPIC_API_KEY не задан — Vision анализ недоступен")
-            return None
-
-        # Список ников игроков для подсказки модели
-        team1_nicks = [p["username"] for p in players if p["team"] == 1]
-        team2_nicks = [p["username"] for p in players if p["team"] == 2]
-
-        prompt = f"""Ты анализируешь скриншот результата игры.
-
-Игроки Команды 1 (синие, верхние): {", ".join(team1_nicks) or "неизвестно"}
-Игроки Команды 2 (красные, нижние): {", ".join(team2_nicks) or "неизвестно"}
-
-Определи результат игры по скриншоту. Правила:
-- Если сверху написано "ПОБЕДА" — верхняя команда (Команда 1) выиграла
-- Если сверху написано "ПОРАЖЕНИЕ" — верхняя команда (Команда 1) проиграла
-- Также определи счёт (числа по бокам от надписи, например "2 : 1")
-
-Отвечай ТОЛЬКО JSON без пояснений, строго в формате:
-{{"team1_result": "win" или "lose" или "draw", "score": "X:Y или неизвестно", "confidence": "high" или "low"}}
-
-confidence = "high" если чётко видно ПОБЕДА/ПОРАЖЕНИЕ, "low" если скрин нечёткий или непонятный."""
-
-        b64 = base64.standard_b64encode(image_bytes).decode()
-        media_type = content_type if content_type in (
-            "image/jpeg", "image/png", "image/gif", "image/webp"
-        ) else "image/png"
-
-        payload = {
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 200,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": b64,
-                            },
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-        }
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        log.warning(f"Claude Vision API error {resp.status}: {body[:300]}")
-                        return None
-                    data = await resp.json()
-
-            text = data["content"][0]["text"].strip()
-            # Убираем возможные markdown блоки
-            text = text.replace("```json", "").replace("```", "").strip()
-            result = json.loads(text)
-
-            if result.get("team1_result") not in ("win", "lose", "draw"):
-                return None
-            return result
-
-        except (json.JSONDecodeError, KeyError, aiohttp.ClientError, asyncio.TimeoutError) as e:
-            log.warning(f"Vision анализ провалился: {e}")
-            return None
-
     # ── Screenshot listener ───────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Слушает скриншоты в каналах комнат во время игры и анализирует их через Claude Vision."""
+        """Слушает скриншоты от капитанов в каналах комнат во время игры."""
         if message.author.bot:
             return
         if not message.guild or message.guild.id != Config.GUILD_ID:
             return
+        # Только если есть вложения (картинки)
         if not message.attachments:
             return
 
@@ -2597,6 +2499,7 @@ confidence = "high" если чётко видно ПОБЕДА/ПОРАЖЕНИ
         if not room or room["status"] != "started":
             return
 
+        # Проверяем что сообщение в канале этой комнаты
         if room["channel_id"] != message.channel.id:
             return
 
@@ -2610,145 +2513,139 @@ confidence = "high" если чётко видно ПОБЕДА/ПОРАЖЕНИ
             return
 
         # Проверяем что вложение — изображение
-        image_att = next(
-            (att for att in message.attachments
-             if att.content_type and att.content_type.startswith("image/")),
-            None,
-        )
-        if not image_att:
+        image_attachments = [
+            att for att in message.attachments
+            if att.content_type and att.content_type.startswith("image/")
+        ]
+        if not image_attachments:
             return
 
         room_id = room["room_id"]
         my_team = me["team"]
 
-        # Сохраняем скрин в БД
+        # Сохраняем скрин (только первый от каждой команды)
         await db.add_screenshot(room_id, my_team, message.author.id)
-        await message.add_reaction("🔍")
+        await message.add_reaction("✅")
 
-        # Пересылаем скрин в канал результатов (первый раз)
+        # Пересылаем скрин в канал результатов (только первый загруженный)
         screenshots = await db.get_screenshots(room_id)
         if len(screenshots) == 1:
             results_channel = await self._get_or_create_results_channel(message.guild)
             team_label = "🔵 Команда 1" if my_team == 1 else "🔴 Команда 2"
-            try:
-                file_copy = await image_att.to_file()
+            files = [await att.to_file() for att in image_attachments]
+            if files:
                 await results_channel.send(
                     f"📸 **Матч #{room_id}** · {team_label} · {message.author.mention}",
-                    files=[file_copy],
+                    files=files,
                 )
-            except Exception:
-                pass
 
-        # ── Анализ через Claude Vision ─────────────────────────────
-        analyzing_msg = await message.channel.send(
-            "🔍 Анализирую скриншот... / Analyzing screenshot..."
-        )
-
+        # ── OCR-анализ скриншота ──────────────────────────────────────────────
+        # Пробуем автоматически определить результат по скрину
+        ocr_result = None
         try:
-            image_bytes = await image_att.read()
-        except Exception as e:
-            log.warning(f"Не удалось прочитать вложение: {e}")
-            await analyzing_msg.delete()
-            await self._send_manual_vote(message.channel, room_id, room["mode"], players, message.author)
-            return
+            from utils.screenshot_ocr import analyze_screenshot
+            # Берём первое изображение из вложений
+            first_image_url = image_attachments[0].url
+            ocr_result = await analyze_screenshot(first_image_url, players)
+        except Exception as _ocr_err:
+            import logging as _log
+            _log.getLogger("bot.ocr").warning(f"OCR analysis failed: {_ocr_err}")
 
-        vision_result = await self._analyze_screenshot(
-            image_bytes, image_att.content_type or "image/png", players
-        )
+        if ocr_result is not None:
+            # OCR успешно определил результат — завершаем игру автоматически
+            winner_team = ocr_result.winner_team
+            loser_team = 2 if winner_team == 1 else 1
 
-        await analyzing_msg.delete()
-        await message.add_reaction("✅")
+            # Проставляем голоса автоматически (от имени бота)
+            # v1 = результат команды 1, v2 = результат команды 2
+            v1 = "win" if winner_team == 1 else "lose"
+            v2 = "win" if winner_team == 2 else "lose"
 
-        if vision_result and vision_result.get("confidence") == "high":
-            # ── Успешный анализ — сразу финализируем без подтверждения ──
-            t1_res = vision_result["team1_result"]   # "win"|"lose"|"draw"
-            t2_res = (
-                "draw" if t1_res == "draw"
-                else ("lose" if t1_res == "win" else "win")
-            )
-            score = vision_result.get("score", "неизвестно")
+            # Устанавливаем end_vote для капитанов/всех участников
+            for p in players:
+                team_vote = v1 if p["team"] == 1 else v2
+                await db.set_end_vote(room_id, p["discord_id"], team_vote)
 
-            t1_emoji = {"win": "🏆 Победа", "lose": "💀 Поражение", "draw": "🤝 Ничья"}[t1_res]
-            t2_emoji = {"win": "🏆 Победа", "lose": "💀 Поражение", "draw": "🤝 Ничья"}[t2_res]
+            confidence_label = "🟢 Высокая" if ocr_result.confidence == "high" else "🟡 Средняя"
+            winner_emoji = "🔵" if winner_team == 1 else "🔴"
+            team_name = f"Команда {winner_team}"
 
-            team1 = [p for p in players if p["team"] == 1]
-            team2 = [p for p in players if p["team"] == 2]
-            t1_nicks = ", ".join(p["username"] for p in team1) or "—"
-            t2_nicks = ", ".join(p["username"] for p in team2) or "—"
+            matched_info = ""
+            if ocr_result.matched_players:
+                matched_info = (
+                    f"\nРаспознаны игроки: {', '.join(ocr_result.matched_players[:6])}"
+                )
 
-            embed = discord.Embed(
-                title="🤖 Результат распознан! / Result detected!",
+            ocr_embed = discord.Embed(
+                title=f"🤖 Результат определён автоматически по скриншоту",
                 description=(
-                    f"**Счёт / Score:** `{score}`\n\n"
-                    f"🔵 **Команда 1** ({t1_nicks})\n→ {t1_emoji}\n\n"
-                    f"🔴 **Команда 2** ({t2_nicks})\n→ {t2_emoji}"
+                    f"{winner_emoji} **{team_name} победила!**\n"
+                    f"Уверенность OCR: {confidence_label}{matched_info}\n\n"
+                    f"Завершаю игру..."
                 ),
-                color=0x57F287,
+                color=0x57F287 if winner_team == 1 else 0xE74C3C,
             )
-            embed.set_footer(text="🤖 Авто-анализ скриншота / Auto screenshot analysis")
-            await message.channel.send(embed=embed)
+            await message.channel.send(embed=ocr_embed)
 
-            # Выставляем голоса и финализируем без ручного подтверждения
-            voter1 = next((p for p in team1 if p["is_captain"]), team1[0] if team1 else None)
-            voter2 = next((p for p in team2 if p["is_captain"]), team2[0] if team2 else None)
-            if voter1 and voter2:
-                await db.set_end_vote(room_id, voter1["discord_id"], t1_res)
-                await db.set_end_vote(room_id, voter2["discord_id"], t2_res)
-                lock = self._finalize_locks.setdefault(room_id, asyncio.Lock())
-                async with lock:
-                    current_room = await db.get_room(room_id)
-                    if current_room and current_room["status"] == "started":
-                        players = await db.get_room_players(room_id)
-                        await self._try_resolve_votes(current_room, players, message.guild)
-            else:
-                log.warning(f"Vision: не удалось найти voter1/voter2 для комнаты {room_id}, fallback на ручное голосование")
-                await self._send_manual_vote(message.channel, room_id, room["mode"], players, message.author)
+            # Финализируем игру через стандартный механизм
+            lock = self._finalize_locks.setdefault(room_id, asyncio.Lock())
+            async with lock:
+                current_room = await db.get_room(room_id)
+                if current_room and current_room["status"] == "started":
+                    # Перечитываем игроков с проставленными голосами
+                    fresh_players = await db.get_room_players(room_id)
 
-        else:
-            # ── Анализ не удался или низкая уверенность — ручное голосование ──
-            reason = (
-                "Скриншот нечёткий или не распознан."
-                if vision_result
-                else "Не удалось проанализировать скриншот."
-            )
-            await message.channel.send(
-                f"⚠️ {reason} Пожалуйста, выберите результат вручную:\n"
-                f"⚠️ {reason} Please select the result manually:"
-            )
-            await self._send_manual_vote(message.channel, room_id, room["mode"], players, message.author)
+                    # Находим представителей для _finalize_game
+                    cap1 = next(
+                        (p for p in fresh_players if p["team"] == 1 and (p["is_captain"] or room["mode"] == "team")),
+                        next((p for p in fresh_players if p["team"] == 1), None)
+                    )
+                    cap2 = next(
+                        (p for p in fresh_players if p["team"] == 2 and (p["is_captain"] or room["mode"] == "team")),
+                        next((p for p in fresh_players if p["team"] == 2), None)
+                    )
+                    if cap1 and cap2:
+                        await self._finalize_game(
+                            current_room, fresh_players,
+                            cap1, cap2,
+                            v1, v2,
+                        )
+            return  # OCR справился — выходим, голосование не нужно
 
-    async def _send_manual_vote(self, channel, room_id: int, mode: str, players: list, author):
-        """Отправляет стандартное сообщение с кнопками голосования вручную."""
+        # ── OCR не смог определить результат — стандартное голосование ───────
         caps = [p for p in players if p["is_captain"]]
         cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
 
-        if mode == "team":
+        if room["mode"] == "team":
             vote_desc = (
-                f"Скриншот от {author.mention} принят.\n"
+                f"Скриншот от {message.author.mention} принят.\n"
+                "🤖 Не удалось распознать результат автоматически.\n"
                 "**Хотя бы один игрок от каждой команды** должен нажать кнопку результата:\n"
                 "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**\n\n"
-                f"Screenshot from {author.mention} accepted.\n"
+                f"Screenshot from {message.author.mention} accepted.\n"
+                "🤖 Could not recognize the result automatically.\n"
                 "**At least one player from each team** must press the result button:\n"
                 "**(🏆 Win + 💀 Loss)** or **(🤝 Draw + 🤝 Draw)**"
             )
         else:
             vote_desc = (
-                f"Скриншот от {author.mention} принят.\n"
+                f"Скриншот от {message.author.mention} принят.\n"
+                "🤖 Не удалось распознать результат автоматически.\n"
                 f"{cap_mentions} — нажмите кнопку с вашим результатом:\n"
                 "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**\n\n"
-                f"Screenshot from {author.mention} accepted.\n"
+                f"Screenshot from {message.author.mention} accepted.\n"
+                "🤖 Could not recognize the result automatically.\n"
                 f"{cap_mentions} — press the button with your result:\n"
                 "**(🏆 Win + 💀 Loss)** or **(🤝 Draw + 🤝 Draw)**"
             )
-
         vote_embed = discord.Embed(
-            title="📸 Голосование / Vote",
+            title="📸 Скриншот получен! / Screenshot received! — Голосование / Vote",
             description=vote_desc,
             color=0xF1C40F,
         )
-        await channel.send(embed=vote_embed, view=VoteEndView(room_id))
+        await message.channel.send(embed=vote_embed, view=VoteEndView(room_id))
 
-
+    # ── Таймаут игры ──────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
