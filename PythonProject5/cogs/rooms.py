@@ -1554,7 +1554,29 @@ class Rooms(commands.Cog):
             embed.add_field(name="🔵 Команда 1", value=t1_mentions, inline=False)
             embed.add_field(name="🔴 Команда 2", value=t2_mentions, inline=False)
             await channel.send(embed=embed)
-            await channel.send("✅ Капитаны, нажмите **▶ Start** чтобы начать!")
+
+            # Объявляем сильную сторону: команда 2 всегда сильная (она пикала второй)
+            strong_side_team = room["strong_side"] if room and room["strong_side"] else 2
+            strong_label = "🔵 Команда 1" if strong_side_team == 1 else "🔴 Команда 2"
+            strong_embed = discord.Embed(
+                title="⚔️ Распределение сторон",
+                description=(
+                    f"**{strong_label}** играет за **СИЛЬНУЮ СТОРОНУ**!\n\n"
+                    "*(Команда чей капитан пикал вторым играет за сильную — "
+                    "так как первый пик является преимуществом)*\n\n"
+                    "Удачи всем участникам!"
+                ),
+                color=0xE67E22,
+            )
+            await channel.send(embed=strong_embed)
+
+            # Кнопка Start прямо здесь чтобы капитанам не листать вверх
+            start_view = discord.ui.View(timeout=None)
+            start_view.add_item(StartButton(room_id))
+            await channel.send(
+                "✅ Капитаны, нажмите **▶ Start** чтобы начать!",
+                view=start_view,
+            )
 
         await self._refresh_room_embed(room_id)
 
