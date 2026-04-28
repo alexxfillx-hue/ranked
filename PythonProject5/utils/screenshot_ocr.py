@@ -286,6 +286,9 @@ async def analyze_screenshot(
         log.warning(f"OCR: ошибка при распознавании: {e}")
         return None
 
+    # DEBUG — полный текст OCR в логах Railway
+    log.warning(f"OCR FULL TEXT:\n{ocr_text}")
+
     if not ocr_text or not ocr_text.strip():
         log.debug("OCR: пустой результат")
         return None
