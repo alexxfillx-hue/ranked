@@ -2558,25 +2558,48 @@ class Rooms(commands.Cog):
         # Пробуем автоматически определить результат по скрину
         ocr_result = None
         try:
-            from utils.screenshot_ocr import analyze_screenshot
-            # Берём первое изображение из вложений
+            from utils.screenshot_ocr import analyze_screenshot, ScreenshotResult, ValidationError
             first_image_url = image_attachments[0].url
             ocr_result = await analyze_screenshot(first_image_url, players)
         except Exception as _ocr_err:
             import logging as _log
             _log.getLogger("bot.ocr").warning(f"OCR analysis failed: {_ocr_err}")
 
-        if ocr_result is not None:
-            # OCR успешно определил результат — завершаем игру автоматически
-            winner_team = ocr_result.winner_team
-            loser_team = 2 if winner_team == 1 else 1
+        # ── Случай 1: скрин не прошёл валидацию (не те игроки / не тот формат) ──
+        if ocr_result is not None and not isinstance(ocr_result, ScreenshotResult):
+            # ValidationError — сообщаем что скрин не подходит и требуем голосование
+            val_err = ocr_result
+            size = room["size"]
+            team1_nicks = ", ".join(f"**{p['username']}**" for p in players if p["team"] == 1)
+            team2_nicks = ", ".join(f"**{p['username']}**" for p in players if p["team"] == 2)
 
-            # Проставляем голоса автоматически (от имени бота)
-            # v1 = результат команды 1, v2 = результат команды 2
+            reject_embed = discord.Embed(
+                title="⚠️ Скриншот не соответствует этому матчу",
+                description=(
+                    f"🤖 OCR проверил скриншот и не нашёл игроков этой комнаты.\n\n"
+                    f"**Причина:** {val_err.reason}\n\n"
+                    f"**Ожидались игроки ({size}v{size}):**\n"
+                    f"🔵 Команда 1: {team1_nicks}\n"
+                    f"🔴 Команда 2: {team2_nicks}\n\n"
+                    f"Пожалуйста, загрузи скриншот **таблицы результатов этой игры**.\n"
+                    f"Если скрин верный — проголосуйте вручную кнопками ниже."
+                ),
+                color=0xED4245,
+            )
+            caps = [p for p in players if p["is_captain"]]
+            cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
+            if cap_mentions:
+                reject_embed.set_footer(text=f"Капитаны: проголосуйте вручную если скрин верный")
+            await message.channel.send(embed=reject_embed, view=VoteEndView(room_id))
+            return
+
+        # ── Случай 2: OCR успешно определил результат ─────────────────────────
+        if isinstance(ocr_result, ScreenshotResult):
+            winner_team = ocr_result.winner_team
+
             v1 = "win" if winner_team == 1 else "lose"
             v2 = "win" if winner_team == 2 else "lose"
 
-            # Устанавливаем end_vote для капитанов/всех участников
             for p in players:
                 team_vote = v1 if p["team"] == 1 else v2
                 await db.set_end_vote(room_id, p["discord_id"], team_vote)
@@ -2588,11 +2611,11 @@ class Rooms(commands.Cog):
             matched_info = ""
             if ocr_result.matched_players:
                 matched_info = (
-                    f"\nРаспознаны игроки: {', '.join(ocr_result.matched_players[:6])}"
+                    f"\nРаспознаны игроки: {', '.join(ocr_result.matched_players[:8])}"
                 )
 
             ocr_embed = discord.Embed(
-                title=f"🤖 Результат определён автоматически по скриншоту",
+                title="🤖 Результат определён автоматически по скриншоту",
                 description=(
                     f"{winner_emoji} **{team_name} победила!**\n"
                     f"Уверенность OCR: {confidence_label}{matched_info}\n\n"
@@ -2602,15 +2625,11 @@ class Rooms(commands.Cog):
             )
             await message.channel.send(embed=ocr_embed)
 
-            # Финализируем игру через стандартный механизм
             lock = self._finalize_locks.setdefault(room_id, asyncio.Lock())
             async with lock:
                 current_room = await db.get_room(room_id)
                 if current_room and current_room["status"] == "started":
-                    # Перечитываем игроков с проставленными голосами
                     fresh_players = await db.get_room_players(room_id)
-
-                    # Находим представителей для _finalize_game
                     cap1 = next(
                         (p for p in fresh_players if p["team"] == 1 and (p["is_captain"] or room["mode"] == "team")),
                         next((p for p in fresh_players if p["team"] == 1), None)
@@ -2627,7 +2646,8 @@ class Rooms(commands.Cog):
                         )
             return  # OCR справился — выходим, голосование не нужно
 
-        # ── OCR не смог определить результат — стандартное голосование ───────
+        # ── Случай 3: OCR недоступен или не смог прочитать изображение ────────
+        # (ocr_result is None) — стандартное голосование
         caps = [p for p in players if p["is_captain"]]
         cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
 
