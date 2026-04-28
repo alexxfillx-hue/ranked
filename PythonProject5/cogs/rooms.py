@@ -2465,7 +2465,22 @@ class Rooms(commands.Cog):
         await self._refresh_lobby()
 
         results_channel = await self._get_or_create_results_channel(guild)
-        await results_channel.send(embed=results_embed)
+        result_msg = await results_channel.send(embed=results_embed)
+
+        # Сохраняем мета-данные матча для !switch и !cancel
+        winner_team = 0  # ничья
+        if v1 == "win":
+            winner_team = 1
+        elif v1 == "lose":
+            winner_team = 2
+        await db.save_match_result(
+            game_id=room_id,
+            winner_team=winner_team,
+            mode=room["mode"],
+            size=room["size"],
+            result_message_id=result_msg.id,
+            result_channel_id=results_channel.id,
+        )
 
         # Пересылаем скриншоты в канал результатов
         if channel and screenshots:
@@ -2884,6 +2899,208 @@ class Rooms(commands.Cog):
             await ctx.send("Укажи игрока: `!mod_captain @игрок`")
             return
         await self.become_captain(ctx, member)
+
+
+    @commands.command(name="switch")
+    async def switch_result(self, ctx: commands.Context, game_id: int = None):
+        """[Мод] Меняет победителя матча на проигравшего. Использование: !switch <номер_матча>"""
+        if not self._is_guild(ctx):
+            return
+        if not self._is_mod(ctx.author):
+            await ctx.send("❌ Нет прав. Только для модераторов.")
+            return
+        if game_id is None:
+            await ctx.send("Использование: `!switch <номер_матча>`  пример: `!switch 61`")
+            return
+
+        db = self.bot.db
+        match_row = await db.get_match_result(game_id)
+        if not match_row:
+            await ctx.send(f"❌ Матч **#{game_id}** не найден в базе. Возможно он уже был отменён или не существует.")
+            return
+
+        result = await db.switch_match(game_id)
+        if "error" in result:
+            await ctx.send(f"❌ Ошибка: матч **#{game_id}** не найден в истории ELO.")
+            return
+
+        guild = ctx.guild
+        elo_changes = result["elo_changes"]
+        new_winner_team = result["new_winner_team"]
+
+        # Синхронизируем ранговые роли
+        from cogs.register import Register
+        reg_cog: Register = self.bot.cogs.get("Register")
+        for pid, (_, new_elo, _, _, _) in elo_changes.items():
+            member = guild.get_member(pid)
+            if member and reg_cog:
+                try:
+                    await reg_cog._sync_rank_role(member, new_elo)
+                except Exception:
+                    pass
+
+        # Удаляем старый embed из канала результатов
+        if match_row["result_message_id"] and match_row["result_channel_id"]:
+            try:
+                results_ch = guild.get_channel(match_row["result_channel_id"])
+                if results_ch:
+                    old_msg = await results_ch.fetch_message(match_row["result_message_id"])
+                    await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        # Строим новый embed с исправленными результатами
+        from config import get_rank
+        if new_winner_team == 0:
+            winner_label = "🤝 Ничья!"
+            winner_color = 0x95A5A6
+        elif new_winner_team == 1:
+            winner_label = "🔵 Победила **Команда 1**!"
+            winner_color = 0x3498DB
+        else:
+            winner_label = "🔴 Победила **Команда 2**!"
+            winner_color = 0xE74C3C
+
+        mode_labels_r = {"team": "👥 Командный", "random": "🎲 Рандомный", "cap": "🎯 Капитанский"}
+        mode_label_r = mode_labels_r.get(match_row["mode"] or "", "")
+
+        # Разбиваем игроков по командам (из game_results уже обновлённых)
+        gr_rows = await db.pool.fetch(
+            "SELECT DISTINCT discord_id, result FROM game_results WHERE game_id=$1", game_id
+        )
+
+        team1_ids = []
+        team2_ids = []
+        # После switch: win = новая победившая команда
+        # Нам нужно знать кто в какой команде — берём из elo_history
+        hist_rows = await db.pool.fetch(
+            """SELECT eh.discord_id, rp_team.team
+               FROM elo_history eh
+               LEFT JOIN (
+                   SELECT DISTINCT ON (discord_id) discord_id,
+                          CASE WHEN result='win' THEN 1 ELSE 2 END as team
+                   FROM game_results WHERE game_id=$1
+               ) rp_team ON rp_team.discord_id = eh.discord_id
+               WHERE eh.game_id=$1""",
+            game_id,
+        )
+
+        # Простой способ: смотрим новый result игрока
+        for row in gr_rows:
+            if row["result"] == "win":
+                # Победившая команда — это new_winner_team
+                if new_winner_team == 1:
+                    team1_ids.append(row["discord_id"])
+                else:
+                    team2_ids.append(row["discord_id"])
+            elif row["result"] == "lose":
+                if new_winner_team == 1:
+                    team2_ids.append(row["discord_id"])
+                else:
+                    team1_ids.append(row["discord_id"])
+
+        def player_switch_line(pid):
+            if pid in elo_changes:
+                _, new_elo, new_change, new_result, _ = elo_changes[pid]
+                sign = "+" if new_change >= 0 else ""
+                rank_name, _ = get_rank(new_elo)
+                old_elo = elo_changes[pid][0]
+                return f"<@{pid}> • {rank_name} • {old_elo} → **{new_elo}** ({sign}{new_change})"
+            return f"<@{pid}>"
+
+        t1_text = "\n".join(player_switch_line(pid) for pid in team1_ids) or "—"
+        t2_text = "\n".join(player_switch_line(pid) for pid in team2_ids) or "—"
+
+        new_embed = discord.Embed(
+            title=f"📋 Матч #{game_id}  ·  {match_row['size']}v{match_row['size']}  ·  {mode_label_r}  ·  {winner_label}",
+            color=winner_color,
+        )
+        new_embed.add_field(name="🔵 Команда 1", value=t1_text, inline=False)
+        new_embed.add_field(name="🔴 Команда 2", value=t2_text, inline=False)
+        new_embed.set_footer(text="Матч завершён · результат исправлен модератором")
+        new_embed.timestamp = discord.utils.utcnow()
+
+        # Постим исправленный embed
+        results_channel = guild.get_channel(match_row["result_channel_id"])
+        if not results_channel:
+            results_channel = await self._get_or_create_results_channel(guild)
+
+        new_msg = await results_channel.send(embed=new_embed)
+
+        # Обновляем message_id в БД
+        await db.pool.execute(
+            "UPDATE match_results SET result_message_id=$1, winner_team=$2 WHERE game_id=$3",
+            new_msg.id, new_winner_team, game_id,
+        )
+
+        await ctx.send(
+            f"✅ Результат матча **#{game_id}** исправлен. "
+            f"{'🔵 Команда 1' if new_winner_team == 1 else '🔴 Команда 2' if new_winner_team == 2 else '🤝 Ничья'} теперь победитель."
+        )
+
+    @commands.command(name="cancel")
+    async def cancel_match(self, ctx: commands.Context, game_id: int = None):
+        """[Мод] Полностью отменяет матч и откатывает ELO всем игрокам. Использование: !cancel <номер_матча>"""
+        if not self._is_guild(ctx):
+            return
+        if not self._is_mod(ctx.author):
+            await ctx.send("❌ Нет прав. Только для модераторов.")
+            return
+        if game_id is None:
+            await ctx.send("Использование: `!cancel <номер_матча>`  пример: `!cancel 61`")
+            return
+
+        db = self.bot.db
+        match_row = await db.get_match_result(game_id)
+
+        result = await db.cancel_match(game_id)
+        if "error" in result:
+            await ctx.send(f"❌ Матч **#{game_id}** не найден. Возможно он уже был отменён.")
+            return
+
+        guild = ctx.guild
+        affected = result["affected"]
+
+        # Синхронизируем ранговые роли
+        from cogs.register import Register
+        reg_cog: Register = self.bot.cogs.get("Register")
+        for entry in affected:
+            member = guild.get_member(entry["discord_id"])
+            if member and reg_cog:
+                try:
+                    await reg_cog._sync_rank_role(member, entry["elo_after"])
+                except Exception:
+                    pass
+
+        # Удаляем embed из канала результатов
+        if match_row and match_row["result_message_id"] and match_row["result_channel_id"]:
+            try:
+                results_ch = guild.get_channel(match_row["result_channel_id"])
+                if results_ch:
+                    old_msg = await results_ch.fetch_message(match_row["result_message_id"])
+                    await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        # Формируем отчёт
+        lines = []
+        for entry in affected:
+            delta = entry["elo_after"] - entry["elo_before"]
+            sign = "+" if delta >= 0 else ""
+            result_emoji = {"win": "🏆", "lose": "💀", "draw": "🤝"}.get(entry["result"], "")
+            lines.append(
+                f"{result_emoji} <@{entry['discord_id']}> "
+                f"{entry['elo_before']} → **{entry['elo_after']}** ({sign}{delta})"
+            )
+
+        embed = discord.Embed(
+            title=f"🗑️ Матч #{game_id} отменён",
+            description="\n".join(lines) if lines else "Нет данных об игроках.",
+            color=0xED4245,
+        )
+        embed.set_footer(text=f"Отменил: {ctx.author.display_name}")
+        embed.timestamp = discord.utils.utcnow()
+        await ctx.send(embed=embed)
 
 
 async def setup(bot):
