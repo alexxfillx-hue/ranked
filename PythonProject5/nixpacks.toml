@@ -1,5 +1,0 @@
-[phases.setup]
-nixPkgs = ["tesseract", "tesseract-data-rus", "tesseract-data-eng"]
-
-[phases.install]
-cmds = ["pip install pytesseract pillow aiohttp"]
