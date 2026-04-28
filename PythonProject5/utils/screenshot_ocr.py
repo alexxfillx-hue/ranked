@@ -95,14 +95,6 @@ def _normalize(s: str) -> str:
 #   "(CL) nick"     -> "nick"
 #   "TAG. nick"     -> "nick"     (тег с точкой без скобок)
 #   "Mursal"        -> "Mursal"   (без тега — не трогаем)
-# Иконки/значки команды перед строкой игрока: Tesseract читает их как мусорные символы.
-# Примеры OCR-артефактов: "~'r [D.3s] alekz", "© TEST2", "tr [D.3s] alekz", "® TEST2"
-# Паттерн: короткий мусорный токен (≤3 символа) + пробел + начало тега или ника.
-_ICON_RE = re.compile(
-    r'^[^\w\u0400-\u04FF]*[\w]{0,3}[^\w\u0400-\u04FF]*\s+(?=[\[{(A-Za-z\u0400-\u04FF0-9])',
-    re.UNICODE,
-)
-
 _TAG_RE = re.compile(
     r"^(?:"
     r"\[.*?\]"          # [TAG]
@@ -112,6 +104,30 @@ _TAG_RE = re.compile(
     r"|[^\s]*\}"        # D.3s}  (OCR потерял '{')
     r"|[^\s]*\)"        # D.3s)  (OCR потерял '(')
     r")\s*",
+    re.UNICODE,
+)
+
+# Паттерн строки игрока в таблице результатов.
+# Структура: ИКОНКА(мусор) [ТЕГ] НИК GS_число ...
+#
+# Примеры реального OCR-вывода:
+#   "+> [Rove] psykos 9999 620 ..."   -> psykos
+#   "~'y [D.3s] alekz 9999 592 ..."   -> alekz
+#   "+r [ide] 2x2 575 40 ..."         -> 2x2
+#   "ty Focus 506 37 ..."             -> Focus
+#   "© TEST2 7392 0 ..."              -> TEST2
+#
+# Алгоритм:
+#   1. Иконка-мусор: любые символы до первого [, {, ( или до первого «настоящего» слова+цифры
+#   2. Необязательный тег в скобках: [TAG] / {TAG} / (TAG)
+#   3. Ник: первое непустое слово (может содержать буквы, цифры, _, -)
+#   4. За ником обязательно идёт пробел + цифра (это GS или счёт) — это якорь что строка игрока
+_PLAYER_LINE_RE = re.compile(
+    r"^"
+    r"(?:[^\w\u0400-\u04FF\[{(]|\b\w{1,3}\b)*\s+"  # иконка-мусор + пробел
+    r"(?:[\[{(][^\]})]*[\]})]\s*)?"                  # необязательный [TAG]
+    r"(\S+)"                                          # НИК (захватываем)
+    r"\s+\d",                                         # пробел + цифра (GS) — якорь
     re.UNICODE,
 )
 
@@ -148,40 +164,36 @@ def _levenshtein(a: str, b: str) -> int:
 
 def _extract_ocr_names(ocr_text: str) -> list[str]:
     """
-    Извлекает «чистые» ники из OCR-текста.
+    Извлекает «чистые» ники из OCR-текста используя _PLAYER_LINE_RE.
 
-    Структура строки таблицы результатов:
-        [ИКОНКА] [TAG] НИК   GS   СЧЁТ   У   П   У/П   ...
+    Структура строки игрока в таблице:
+        ИКОНКА(мусор)  [ТЕГ]  НИК  GS  СЧЁТ  ...
 
-    Иконка — это символ команды (звёздочка, ромб и т.п.), который Tesseract
-    читает как мусорный токен: "~'r", "©", "tr", "®" и т.д.
-    Ник всегда стоит ПЕРВЫМ после иконки и тега, затем идут числа (GS и др.).
+    _PLAYER_LINE_RE захватывает ник и требует наличия цифры после него
+    (это GS или счёт) — такой якорь исключает заголовки и прочий мусор.
 
-    Для каждой строки:
-      1. Убираем мусорный иконка-токен в начале строки (_ICON_RE).
-      2. Убираем клановый тег (_strip_tag).
-      3. Берём ТОЛЬКО ПЕРВЫЙ токен — это ник.
-         Все последующие токены (числа GS, счёт и т.д.) игнорируем.
-      4. Нормализуем токен.
-
-    Возвращаем список нормализованных кандидатов (без дублей).
+    Сервисные слова (заголовки колонок, игровые термины) дополнительно фильтруются.
     """
+    _SERVICE = {
+        "gs", "имя", "name", "счёт", "счет", "score",
+        "убийства", "смерти", "помощь", "kills", "deaths", "assists",
+        "kda", "yd", "уп", "yn", "пн",
+        "победа", "поражение", "победа", "nopakehme", "nobeda",
+        "victory", "defeat", "win", "lose", "loss",
+        "draw", "ничья", "ctf", "песочница", "sandbox",
+        "team", "команда", "rating", "рейтинг", "place", "место",
+        "all", "total", "necouhmlia", "necoyhula",
+    }
     candidates = set()
     for raw_line in ocr_text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        # 1. Убираем мусорный иконка-токен в начале (© , ~'r , tr , ® , ...)
-        line = _ICON_RE.sub("", line)
-        # 2. Убираем клановый тег из начала строки
-        clean = _strip_tag(line)
-        if not clean:
+        m = _PLAYER_LINE_RE.match(line)
+        if not m:
             continue
-        # 3. Берём ТОЛЬКО первый токен — это ник.
-        #    Остальные токены — числа (GS, счёт, убийства и т.д.), нам не нужны.
-        first_token = re.split(r"[\s\t]+", clean)[0]
-        tok_norm = _normalize(first_token)
-        if len(tok_norm) >= 2:
+        tok_norm = _normalize(m.group(1))
+        if len(tok_norm) >= 1 and tok_norm not in _SERVICE:
             candidates.add(tok_norm)
     return list(candidates)
 
@@ -333,21 +345,9 @@ def _validate_players(players: list[dict], matched: list[str], ocr_text: str | N
         ocr_candidates = _extract_ocr_names(ocr_text)
         # Фильтруем мусорные токены: оставляем только «никоподобные» —
         # длина ≥ 3, нет чисто числовых, нет служебных слов
-        _SERVICE = {
-            "gs", "имя", "name", "счёт", "счет", "score", "убийства",
-            "смерти", "помощь", "kills", "deaths", "assists", "kda", "yd",
-            "победа", "поражение", "victory", "defeat", "win", "lose", "loss",
-            "draw", "ничья", "ctf", "песочница", "sandbox", "team", "команда",
-            "rating", "рейтинг", "place", "место", "all", "total",
-            # заголовки колонок таблицы результатов
-            "уп", "yn", "пн", "имяс", "names",
-        }
-        nick_like = [
-            c for c in ocr_candidates
-            if len(c) >= 2
-            and not re.fullmatch(r"[\d.,]+", c)
-            and c not in _SERVICE
-        ]
+        # _extract_ocr_names теперь возвращает только реальные ники (через _PLAYER_LINE_RE),
+        # поэтому дополнительная фильтрация минимальна
+        nick_like = [c for c in ocr_candidates if len(c) >= 1]
         total_on_screen = len(nick_like)
 
         if total_on_screen > total_expected:
