@@ -208,7 +208,27 @@ def _find_verdict(text: str) -> Optional[str]:
     return None
 
 
-def _validate_players(players: list[dict], matched: list[str]) -> Optional[ValidationError]:
+
+def _count_player_rows(ocr_text: str) -> int:
+    """
+    Считает количество строк с игроками в OCR-тексте.
+
+    Признак строки игрока — наличие GS-рейтинга (число вида "N NNN" или "NNNN",
+    значение 1000–9999). Заголовки таблицы и пустые строки пропускаются.
+    Используется для проверки что скрин содержит ровно N*2 игроков.
+    """
+    count = 0
+    for raw_line in ocr_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Паттерн GS: "9 999" (цифра, пробел, три цифры) или "9999" (4 цифры слитно)
+        if re.search(r"\b[1-9]\s\d{3}\b", line) or re.search(r"\b[1-9]\d{3}\b", line):
+            count += 1
+    return count
+
+
+def _validate_players(players: list[dict], matched: list[str], ocr_text: str | None = None) -> Optional[ValidationError]:
     """
     СТРОГАЯ проверка: все игроки комнаты должны быть на скрине.
 
@@ -227,6 +247,22 @@ def _validate_players(players: list[dict], matched: list[str]) -> Optional[Valid
             expected_count=0,
             found_count=0,
         )
+
+    # Проверяем количество строк игроков на скрине.
+    # Скрин должен содержать ровно size*2 строк с игроками — не больше, не меньше.
+    # Это защищает от скринов с другим форматом (например, 4v4 скрин при комнате 1v1).
+    if ocr_text is not None:
+        rows_on_screenshot = _count_player_rows(ocr_text)
+        if rows_on_screenshot > 0 and rows_on_screenshot != total_expected:
+            return ValidationError(
+                reason=(
+                    f"❌ Формат {size}v{size}: на скрине обнаружено **{rows_on_screenshot}** строк игроков, "
+                    f"а должно быть ровно **{total_expected}**. "
+                    f"Это скрин другого матча — загрузи скрин именно этой игры ({size}v{size})."
+                ),
+                expected_count=total_expected,
+                found_count=0,
+            )
 
     matched_set = set(matched)
     t1_found = [p for p in team1 if p["username"] in matched_set]
@@ -355,7 +391,7 @@ async def analyze_screenshot(
              matched, [p["username"] for p in players if p["team"] in (1, 2)])
 
     # 2. Строгая валидация: все ли игроки комнаты есть на скрине
-    err = _validate_players(players, matched)
+    err = _validate_players(players, matched, ocr_text)
     if err is not None:
         log.info("OCR validation failed: %s (found %d/%d)",
                  err.reason, err.found_count, err.expected_count)
