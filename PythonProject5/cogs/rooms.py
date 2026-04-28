@@ -3184,11 +3184,16 @@ class Rooms(commands.Cog):
                         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                             pass
                     # Удаляем сообщения со скринами этого матча.
-                    # Они отправляются с текстом содержащим "Матч #{game_id}".
-                    screenshot_marker = f"Матч #{game_id}"
+                    # Бот отправляет скрины с текстом содержащим "Матч #{game_id}" или
+                    # "Скриншоты матча #{game_id}".
+                    screenshot_markers = [
+                        f"Матч #{game_id}",
+                        f"Скриншоты матча **#{game_id}**",
+                        f"Скриншоты матча #{game_id}",
+                    ]
                     try:
                         async for msg in results_ch.history(limit=100):
-                            if msg.author == self.bot.user and screenshot_marker in msg.content:
+                            if msg.author == self.bot.user and any(m in msg.content for m in screenshot_markers):
                                 try:
                                     await msg.delete()
                                 except (discord.NotFound, discord.Forbidden):
