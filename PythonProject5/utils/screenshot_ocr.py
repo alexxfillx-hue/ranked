@@ -254,15 +254,35 @@ def _count_player_rows(ocr_text: str) -> int:
     Признак строки игрока — наличие GS-рейтинга (число вида "N NNN" или "NNNN",
     значение 1000–9999). Заголовки таблицы и пустые строки пропускаются.
     Используется для проверки что скрин содержит ровно N*2 игроков.
+
+    Возвращает -1 если не удалось надёжно посчитать (OCR не нашёл ни одного числа
+    похожего на GS-рейтинг) — в этом случае проверка количества пропускается.
     """
     count = 0
+    any_number_found = False
     for raw_line in ocr_text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
+        # Пропускаем строки заголовков таблицы
+        header_keywords = ("ИМЯ", "GS", "СЧЁТ", "СЧЕТ", "У/П", "NAME", "SCORE", "K/D", "KDA")
+        if any(kw in line.upper() for kw in header_keywords):
+            continue
         # Паттерн GS: "9 999" (цифра, пробел, три цифры) или "9999" (4 цифры слитно)
-        if re.search(r"\b[1-9]\s\d{3}\b", line) or re.search(r"\b[1-9]\d{3}\b", line):
+        # Также учитываем OCR-артефакты: неразрывные пробелы (\xa0), точки вместо пробелов
+        normalized_line = line.replace("\xa0", " ").replace(".", " ")
+        has_gs = (
+            re.search(r"\b[1-9]\s\d{3}\b", normalized_line)
+            or re.search(r"\b[1-9]\d{3}\b", normalized_line)
+        )
+        if has_gs:
+            any_number_found = True
             count += 1
+
+    # Если ни одного GS-числа не найдено — OCR не смог прочитать таблицу надёжно
+    # Возвращаем -1 чтобы _validate_players пропустил эту проверку
+    if not any_number_found:
+        return -1
     return count
 
 
@@ -291,6 +311,8 @@ def _validate_players(players: list[dict], matched: list[str], ocr_text: str | N
     # Это защищает от скринов с другим форматом (например, 4v4 скрин при комнате 1v1).
     if ocr_text is not None:
         rows_on_screenshot = _count_player_rows(ocr_text)
+        # -1 означает что OCR не смог надёжно посчитать строки — пропускаем проверку
+        # 0 тоже означает что паттерны GS не нашлись — пропускаем
         if rows_on_screenshot > 0 and rows_on_screenshot != total_expected:
             return ValidationError(
                 reason=(
@@ -301,6 +323,23 @@ def _validate_players(players: list[dict], matched: list[str], ocr_text: str | N
                 expected_count=total_expected,
                 found_count=0,
             )
+
+    # Дополнительная проверка: считаем уникальных игроков найденных в OCR.
+    # Если OCR нашёл БОЛЬШЕ игроков чем ожидается в формате — отклоняем скрин.
+    # Это защищает от случая когда _count_player_rows не сработал (OCR не распознал GS),
+    # но при этом в OCR-тексте реально видно больше ников чем должно быть.
+    if len(matched) > total_expected:
+        return ValidationError(
+            reason=(
+                f"❌ Формат {size}v{size}: распознано **{len(matched)}** игроков, "
+                f"хотя в этом матче должно быть ровно **{total_expected}**. "
+                f"Это скрин другого матча — загрузи скрин именно этой игры ({size}v{size})."
+            ),
+            found_players=matched,
+            missing_players=[],
+            expected_count=total_expected,
+            found_count=len(matched),
+        )
 
     matched_set = set(matched)
     t1_found = [p for p in team1 if p["username"] in matched_set]
