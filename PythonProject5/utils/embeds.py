@@ -157,7 +157,8 @@ def room_embed(room_id: int, size: int, players, mode: str = "team") -> discord.
 def profile_embed(player, member: discord.Member) -> discord.Embed:
     rank_name, color = get_rank(player["elo"])
     total = player["wins"] + player["losses"] + player["draws"]
-    wr = round(player["wins"] / total * 100, 1) if total else 0
+    decisive = player["wins"] + player["losses"]
+    wr = round(player["wins"] / decisive * 100, 1) if decisive else 0
     streak = player["win_streak"]
 
     embed = discord.Embed(
