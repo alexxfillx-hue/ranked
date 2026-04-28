@@ -406,33 +406,78 @@ def _validate_players(players: list[dict], matched: list[str], ocr_text: str | N
     return None
 
 
-def _determine_winner_team(verdict: str, players: list[dict], matched: list[str]) -> tuple[int, str]:
+def _find_team_first_position(team_players: list[dict], ocr_text: str) -> int:
     """
-    Определяет победившую команду исходя из вердикта и расположения игроков.
+    Возвращает позицию (символьный индекс) первого упоминания любого ника из команды в OCR-тексте.
+    Если никто не найден — возвращает 999999.
+    Используется для определения какая команда стоит ВЫШЕ в таблице результатов.
+    """
+    ocr_norm = _normalize(ocr_text)
+    earliest = 999999
+    for p in team_players:
+        nick_norm = _normalize(p["username"])
+        if not nick_norm:
+            continue
+        # Ищем точное вхождение как отдельное слово
+        pattern = r"(?<![a-zA-Z0-9_\u0400-\u04FF])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_\u0400-\u04FF])"
+        m = re.search(pattern, ocr_norm)
+        if m and m.start() < earliest:
+            earliest = m.start()
+    return earliest
 
-    win_top    → ПОБЕДА стоит выше — значит верхняя команда победила.
-    win_bottom → ПОРАЖЕНИЕ стоит выше — значит верхняя команда проиграла.
 
-    «Верхняя» команда = та, чьи игроки идут первыми в списке скрина.
-    Мы определяем это по тому, игроки какой команды найдены раньше в OCR-тексте.
-    Если определить не получается — используем team1 как «верхнюю» по умолчанию.
+def _determine_winner_team(verdict: str, players: list[dict], matched: list[str], ocr_text: str = "") -> tuple[int, str]:
+    """
+    Определяет победившую команду исходя из вердикта и РЕАЛЬНОГО расположения команд на скрине.
+
+    Алгоритм:
+      1. Находим позицию первого ника каждой команды в OCR-тексте.
+      2. Та команда, чьи ники встречаются раньше — «верхняя» на скрине.
+      3. win_top  → верхняя команда победила (ПОБЕДА/VICTORY стоит раньше).
+      4. win_bottom → верхняя команда проиграла.
+
+    Если позиции определить невозможно (нет OCR-текста) — используем team1 как «верхнюю».
     """
     matched_set = set(matched)
     t1_found = [p for p in players if p["team"] == 1 and p["username"] in matched_set]
     t2_found = [p for p in players if p["team"] == 2 and p["username"] in matched_set]
 
-    # После строгой валидации обе команды гарантированно найдены
-    # Confidence = high, т.к. все игроки прошли валидацию
     confidence = "high"
 
-    # win_top: слово ПОБЕДА появляется раньше ПОРАЖЕНИЯ → верхняя команда выиграла.
-    # Мы считаем team1 «верхней» (они перечислены первыми в players).
-    if verdict == "win_top":
-        winner_team = 1
+    # Определяем какая команда реально стоит выше на скрине
+    top_team = 1  # дефолт если не можем определить
+    if ocr_text and t1_found and t2_found:
+        pos1 = _find_team_first_position(t1_found, ocr_text)
+        pos2 = _find_team_first_position(t2_found, ocr_text)
+        log.debug(
+            "OCR team positions: team1_first=%d team2_first=%d → top_team=%d",
+            pos1, pos2, 1 if pos1 <= pos2 else 2,
+        )
+        if pos1 <= pos2:
+            top_team = 1  # Команда 1 стоит выше на скрине
+        else:
+            top_team = 2  # Команда 2 стоит выше на скрине
     else:
-        # win_bottom: ПОРАЖЕНИЕ раньше → верхняя (team1) проиграла
-        winner_team = 2
+        log.warning(
+            "OCR: не удалось определить позиции команд на скрине "
+            "(t1_found=%d t2_found=%d ocr_len=%d) — используем team1 как верхнюю",
+            len(t1_found), len(t2_found), len(ocr_text),
+        )
 
+    bottom_team = 2 if top_team == 1 else 1
+
+    # win_top: ПОБЕДА/VICTORY встретилась РАНЬШЕ чем ПОРАЖЕНИЕ/DEFEAT
+    # → верхняя команда победила
+    if verdict == "win_top":
+        winner_team = top_team
+    else:
+        # win_bottom: ПОРАЖЕНИЕ встретилось раньше → верхняя проиграла
+        winner_team = bottom_team
+
+    log.info(
+        "OCR winner determination: verdict=%s top_team=%d bottom_team=%d → winner_team=%d",
+        verdict, top_team, bottom_team, winner_team,
+    )
     return winner_team, confidence
 
 
@@ -496,8 +541,8 @@ async def analyze_screenshot(
             expected_count=len(team_players),
         )
 
-    # 4. Определяем победителя
-    winner_team, confidence = _determine_winner_team(verdict, players, matched)
+    # 4. Определяем победителя (передаём ocr_text для определения позиций команд)
+    winner_team, confidence = _determine_winner_team(verdict, players, matched, ocr_text)
     log.info(
         "OCR result: winner_team=%d confidence=%s verdict=%s matched=%s",
         winner_team, confidence, verdict, matched,
