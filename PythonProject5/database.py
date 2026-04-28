@@ -86,6 +86,18 @@ CREATE TABLE IF NOT EXISTS game_results (
 );
 CREATE INDEX IF NOT EXISTS idx_game_results_discord ON game_results(discord_id);
 CREATE INDEX IF NOT EXISTS idx_game_results_opponent ON game_results(opponent_id);
+
+CREATE TABLE IF NOT EXISTS match_results (
+    id                 SERIAL    PRIMARY KEY,
+    game_id            INTEGER   NOT NULL UNIQUE,
+    winner_team        INTEGER   NOT NULL,   -- 1 или 2, 0 = ничья
+    mode               TEXT,
+    size               INTEGER,
+    result_message_id  BIGINT,              -- id embed-сообщения в канале результатов
+    result_channel_id  BIGINT,              -- id канала результатов
+    played_at          TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_match_results_game ON match_results(game_id);
 """
 
 
@@ -139,6 +151,21 @@ class Database:
             )
             await conn.execute(
                 "ALTER TABLE rooms ADD COLUMN IF NOT EXISTS strong_side INTEGER DEFAULT 0"
+            )
+            await conn.execute(
+                """CREATE TABLE IF NOT EXISTS match_results (
+                    id                 SERIAL    PRIMARY KEY,
+                    game_id            INTEGER   NOT NULL UNIQUE,
+                    winner_team        INTEGER   NOT NULL,
+                    mode               TEXT,
+                    size               INTEGER,
+                    result_message_id  BIGINT,
+                    result_channel_id  BIGINT,
+                    played_at          TIMESTAMP DEFAULT NOW()
+                )"""
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_match_results_game ON match_results(game_id)"
             )
 
     @property
@@ -613,4 +640,274 @@ class Database:
             discord_id,
         )
         return _rows(rows)
+
+    # ──────────────────────── Match Results ────────────────────────
+
+    async def save_match_result(
+        self,
+        game_id: int,
+        winner_team: int,
+        mode: str,
+        size: int,
+        result_message_id: int,
+        result_channel_id: int,
+    ):
+        """Сохраняет мета-информацию о завершённом матче (для !switch и !cancel)."""
+        await self.pool.execute(
+            """INSERT INTO match_results
+               (game_id, winner_team, mode, size, result_message_id, result_channel_id)
+               VALUES ($1,$2,$3,$4,$5,$6)
+               ON CONFLICT (game_id) DO UPDATE
+               SET winner_team=$2, mode=$3, size=$4,
+                   result_message_id=$5, result_channel_id=$6""",
+            game_id, winner_team, mode, size, result_message_id, result_channel_id,
+        )
+
+    async def get_match_result(self, game_id: int) -> _Row | None:
+        r = await self.pool.fetchrow(
+            "SELECT * FROM match_results WHERE game_id=$1", game_id
+        )
+        return _row(r)
+
+    # ──────────────────────── !cancel ────────────────────────
+
+    async def cancel_match(self, game_id: int) -> dict:
+        """
+        Полностью отменяет матч:
+        — откатывает ELO всем игрокам (wins/losses/draws/games_played/win_streak)
+        — удаляет записи из game_results и elo_history
+        — удаляет из match_results
+        Возвращает dict с информацией об откате для отчёта модератору.
+        """
+        affected = []
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Собираем уникальных игроков матча из elo_history
+                hist_rows = await conn.fetch(
+                    "SELECT * FROM elo_history WHERE game_id=$1", game_id
+                )
+                if not hist_rows:
+                    return {"error": "not_found"}
+
+                for h in hist_rows:
+                    pid = h["discord_id"]
+                    elo_before = h["elo_before"]
+                    result_in_hist = h["result"]  # 'win'|'lose'|'draw' или NULL (старые записи)
+
+                    # Определяем результат из знака change если result NULL
+                    if not result_in_hist:
+                        if h["change"] > 0:
+                            result_in_hist = "win"
+                        elif h["change"] < 0:
+                            result_in_hist = "lose"
+                        else:
+                            result_in_hist = "draw"
+
+                    # Откатываем ELO и статистику
+                    if result_in_hist == "win":
+                        await conn.execute(
+                            """UPDATE players SET
+                               elo=$1,
+                               wins=GREATEST(0, wins-1),
+                               games_played=GREATEST(0, games_played-1),
+                               win_streak=GREATEST(0, win_streak-1)
+                               WHERE discord_id=$2""",
+                            elo_before, pid,
+                        )
+                    elif result_in_hist == "lose":
+                        await conn.execute(
+                            """UPDATE players SET
+                               elo=$1,
+                               losses=GREATEST(0, losses-1),
+                               games_played=GREATEST(0, games_played-1)
+                               WHERE discord_id=$2""",
+                            elo_before, pid,
+                        )
+                    else:  # draw
+                        await conn.execute(
+                            """UPDATE players SET
+                               elo=$1,
+                               draws=GREATEST(0, draws-1),
+                               games_played=GREATEST(0, games_played-1)
+                               WHERE discord_id=$2""",
+                            elo_before, pid,
+                        )
+
+                    affected.append({
+                        "discord_id": pid,
+                        "elo_before": h["elo_after"],   # было до отката
+                        "elo_after": elo_before,         # стало после отката
+                        "result": result_in_hist,
+                    })
+
+                # Удаляем все следы матча из БД
+                await conn.execute("DELETE FROM elo_history WHERE game_id=$1", game_id)
+                await conn.execute("DELETE FROM game_results WHERE game_id=$1", game_id)
+                await conn.execute("DELETE FROM match_results WHERE game_id=$1", game_id)
+
+        return {"affected": affected}
+
+    # ──────────────────────── !switch ────────────────────────
+
+    async def switch_match(self, game_id: int) -> dict:
+        """
+        Меняет победителя матча на проигравшего и наоборот.
+        — Откатывает старые ELO
+        — Применяет новые (победители становятся проигравшими и наоборот)
+        — Обновляет game_results и match_results
+        Возвращает dict с новыми данными для перепостинга embed.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                hist_rows = await conn.fetch(
+                    "SELECT * FROM elo_history WHERE game_id=$1", game_id
+                )
+                if not hist_rows:
+                    return {"error": "not_found"}
+
+                match_row = await conn.fetchrow(
+                    "SELECT * FROM match_results WHERE game_id=$1", game_id
+                )
+
+                # Собираем данные игроков по командам через game_results
+                gr_rows = await conn.fetch(
+                    "SELECT DISTINCT discord_id, result FROM game_results WHERE game_id=$1",
+                    game_id,
+                )
+
+                # Строим карту: discord_id → старый result
+                old_results: dict[int, str] = {}
+                for row in gr_rows:
+                    # Берём первый результат (игрок может встречаться против нескольких)
+                    if row["discord_id"] not in old_results:
+                        old_results[row["discord_id"]] = row["result"]
+
+                # Инвертируем результаты
+                def invert(r: str) -> str:
+                    if r == "win":
+                        return "lose"
+                    if r == "lose":
+                        return "win"
+                    return "draw"
+
+                new_results = {pid: invert(r) for pid, r in old_results.items()}
+
+                # Для каждого игрока: откат → применение нового ELO
+                elo_changes = {}
+                for h in hist_rows:
+                    pid = h["discord_id"]
+                    old_result = old_results.get(pid)
+                    new_result = new_results.get(pid)
+                    if not old_result or not new_result:
+                        continue
+
+                    elo_before_orig = h["elo_before"]   # ELO до старого матча
+                    old_change = h["change"]             # старое изменение
+
+                    # Новый change = -old_change (зеркально)
+                    new_change = -old_change
+                    # Ограничения: победа >= +1, поражение <= -1
+                    if new_result == "win" and new_change < 1:
+                        new_change = 1
+                    elif new_result == "lose" and new_change > -1:
+                        new_change = -1
+
+                    new_elo = max(0, elo_before_orig + new_change)
+                    elo_changes[pid] = (elo_before_orig, new_elo, new_change, new_result, old_result)
+
+                    # Откат старой статистики
+                    if old_result == "win":
+                        await conn.execute(
+                            """UPDATE players SET
+                               wins=GREATEST(0, wins-1),
+                               games_played=GREATEST(0, games_played-1)
+                               WHERE discord_id=$1""", pid,
+                        )
+                    elif old_result == "lose":
+                        await conn.execute(
+                            """UPDATE players SET
+                               losses=GREATEST(0, losses-1),
+                               games_played=GREATEST(0, games_played-1)
+                               WHERE discord_id=$1""", pid,
+                        )
+                    else:
+                        await conn.execute(
+                            """UPDATE players SET
+                               draws=GREATEST(0, draws-1),
+                               games_played=GREATEST(0, games_played-1)
+                               WHERE discord_id=$1""", pid,
+                        )
+
+                    # Применяем новую статистику
+                    if new_result == "win":
+                        await conn.execute(
+                            """UPDATE players SET
+                               elo=$1,
+                               wins=wins+1,
+                               games_played=games_played+1,
+                               win_streak=win_streak+1
+                               WHERE discord_id=$2""",
+                            new_elo, pid,
+                        )
+                    elif new_result == "lose":
+                        await conn.execute(
+                            """UPDATE players SET
+                               elo=$1,
+                               losses=losses+1,
+                               games_played=games_played+1,
+                               win_streak=0
+                               WHERE discord_id=$2""",
+                            new_elo, pid,
+                        )
+                    else:
+                        await conn.execute(
+                            """UPDATE players SET
+                               elo=$1,
+                               draws=draws+1,
+                               games_played=games_played+1,
+                               win_streak=0
+                               WHERE discord_id=$2""",
+                            new_elo, pid,
+                        )
+
+                    # Обновляем elo_history
+                    await conn.execute(
+                        """UPDATE elo_history SET
+                           elo_after=$1, change=$2, result=$3
+                           WHERE game_id=$4 AND discord_id=$5""",
+                        new_elo, new_change, new_result, game_id, pid,
+                    )
+
+                # Обновляем game_results
+                await conn.execute("DELETE FROM game_results WHERE game_id=$1", game_id)
+                rows_to_insert = []
+                # Перестраиваем game_results с новыми результатами
+                team1_ids = [pid for pid, r in old_results.items() if r == "win"]
+                team2_ids = [pid for pid, r in old_results.items() if r == "lose"]
+                # После switch: старые победители → lose, старые losers → win
+                for p1 in team1_ids:
+                    for p2 in team2_ids:
+                        rows_to_insert.append((game_id, p1, p2, "lose"))
+                        rows_to_insert.append((game_id, p2, p1, "win"))
+                if rows_to_insert:
+                    await conn.executemany(
+                        "INSERT INTO game_results (game_id, discord_id, opponent_id, result) VALUES ($1,$2,$3,$4)",
+                        rows_to_insert,
+                    )
+
+                # Обновляем match_results — меняем winner_team
+                if match_row:
+                    old_winner = match_row["winner_team"]
+                    new_winner = 2 if old_winner == 1 else (1 if old_winner == 2 else 0)
+                    await conn.execute(
+                        "UPDATE match_results SET winner_team=$1 WHERE game_id=$2",
+                        new_winner, game_id,
+                    )
+
+        return {
+            "elo_changes": elo_changes,
+            "match_row": dict(match_row) if match_row else None,
+            "new_winner_team": new_winner if match_row else None,
+        }
 
