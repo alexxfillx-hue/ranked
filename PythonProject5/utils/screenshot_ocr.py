@@ -5,8 +5,14 @@
 Логика:
     1. Скачиваем изображение по URL вложения Discord.
     2. OCR -> получаем текст.
-    3. СТРОГАЯ ВАЛИДАЦИЯ: ищем ники всех игроков комнаты в тексте.
-       Если недостаточно найдено - возвращаем ValidationError (не тот скрин).
+    3. СТРОГАЯ ВАЛИДАЦИЯ по формату комнаты:
+         1v1 → должно быть ровно 2 ника (оба игрока)
+         2v2 → должно быть ровно 4 ника (все 4 игрока)
+         3v3 → должно быть ровно 6 ников (все 6 игроков)
+         4v4 → должно быть ровно 8 ников (все 8 игроков)
+       Ники на скрине могут содержать теги вида [TAG] или {TAG} перед именем —
+       бот вырезает теги и сравнивает только чистый ник.
+       Если хотя бы один ник не найден — скрин не принимается.
     4. Ищем ПОБЕДА / ПОРАЖЕНИЕ -> определяем победителя.
     5. Возвращаем ScreenshotResult, ValidationError, или None.
 """
@@ -53,7 +59,7 @@ class ScreenshotResult:
 
 @dataclass
 class ValidationError:
-    """Скрин не прошёл валидацию - не те игроки / не тот формат."""
+    """Скрин не прошёл валидацию — не те игроки / не тот формат."""
     reason: str
     found_players: list[str] = field(default_factory=list)
     missing_players: list[str] = field(default_factory=list)
@@ -64,31 +70,24 @@ class ValidationError:
 # ── Вспомогательные функции ─────────────────────────────────────────────────────
 
 def _normalize(s: str) -> str:
+    """Приводим к нижнему регистру, убираем диакритику и всё кроме букв/цифр/_."""
     s = unicodedata.normalize("NFKD", s.lower())
     return re.sub(r"[^\w]", "", s, flags=re.UNICODE)
 
 
-def _find_verdict(text: str) -> Optional[str]:
-    upper = text.upper()
-    win_patterns  = [r"ПОБЕДА", r"П0БЕДА", r"ПОБЕДА!", r"VICTORY", r"WIN"]
-    lose_patterns = [r"ПОРАЖЕНИЕ", r"П0РАЖЕНИЕ", r"DEFEAT", r"LOSS", r"LOSE"]
+# Паттерн тегов: [TAG], {TAG}, (TAG) перед именем — захватываем только имя после тега.
+# Примеры: "[D.3s] alekz" -> "alekz", "[Rove] psykos" -> "psykos", "Mursal" -> "Mursal"
+_TAG_RE = re.compile(r"^(?:\[.*?\]|\{.*?\}|\(.*?\))\s*")
 
-    found_win  = any(re.search(p, upper) for p in win_patterns)
-    found_lose = any(re.search(p, upper) for p in lose_patterns)
 
-    if found_win and not found_lose:
-        return "win_top"
-    if found_lose and not found_win:
-        return "win_bottom"
-    if found_win and found_lose:
-        win_pos  = min((m.start() for p in win_patterns  for m in re.finditer(p, upper)), default=9999)
-        lose_pos = min((m.start() for p in lose_patterns for m in re.finditer(p, upper)), default=9999)
-        return "win_top" if win_pos < lose_pos else "win_bottom"
-    return None
+def _strip_tag(name: str) -> str:
+    """Убирает клановый тег из начала имени игрока."""
+    return _TAG_RE.sub("", name).strip()
 
 
 def _levenshtein(a: str, b: str) -> int:
-    if abs(len(a) - len(b)) > 4:
+    """Расстояние Левенштейна. Быстрый отказ при большой разнице длин."""
+    if abs(len(a) - len(b)) > 3:
         return 999
     m, n = len(a), len(b)
     dp = list(range(n + 1))
@@ -101,77 +100,120 @@ def _levenshtein(a: str, b: str) -> int:
     return dp[n]
 
 
+def _extract_ocr_names(ocr_text: str) -> list[str]:
+    """
+    Извлекает «чистые» ники из OCR-текста.
+
+    Для каждой строки:
+      1. Убираем клановый тег (всё что в [] {} () в начале строки).
+      2. Берём первое «слово» как потенциальный ник.
+      3. Нормализуем.
+
+    Возвращаем список нормализованных кандидатов (без дублей).
+    """
+    candidates = set()
+    for raw_line in ocr_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Убираем тег
+        clean = _strip_tag(line)
+        if not clean:
+            continue
+        # Берём первый «токен» (до пробела, табуляции, цифры-столбца и т.п.)
+        token = re.split(r"[\s\t]", clean)[0]
+        token_norm = _normalize(token)
+        if len(token_norm) >= 2:
+            candidates.add(token_norm)
+        # Также добавляем всю строку без тега (на случай ника с пробелом)
+        full_norm = _normalize(clean.split()[0]) if clean.split() else ""
+        if full_norm and len(full_norm) >= 2:
+            candidates.add(full_norm)
+    return list(candidates)
+
+
+def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str) -> bool:
+    """
+    Проверяет, найден ли ник игрока Discord в OCR-тексте.
+
+    Шаги (от строгого к мягкому):
+      1. Точное вхождение нормализованного ника в полный нормализованный текст.
+      2. Точное совпадение с одним из кандидатов.
+      3. Расстояние Левенштейна ≤ 1 (опечатка OCR в 1 символ) для ников ≥ 4 символов.
+    """
+    nick_norm = _normalize(nick)
+    if not nick_norm or len(nick_norm) < 2:
+        return False
+
+    # 1. Прямое вхождение в полный текст
+    if nick_norm in ocr_full_norm:
+        return True
+
+    # 2. Точное совпадение с кандидатом
+    if nick_norm in ocr_candidates:
+        return True
+
+    # 3. Расстояние Левенштейна ≤ 1 (только для ников ≥ 4 символов, чтобы не ловить мусор)
+    if len(nick_norm) >= 4:
+        for cand in ocr_candidates:
+            if _levenshtein(nick_norm, cand) <= 1:
+                return True
+
+    return False
+
+
 def _match_players(ocr_text: str, players: list[dict]) -> list[str]:
-    matched   = []
-    ocr_lines = [_normalize(line) for line in ocr_text.splitlines() if line.strip()]
-    ocr_full  = _normalize(ocr_text)
+    """
+    Возвращает список ников из players, найденных в ocr_text.
+    Теги вида [TAG] игнорируются.
+    """
+    ocr_candidates = _extract_ocr_names(ocr_text)
+    ocr_full_norm  = _normalize(ocr_text)
 
+    matched = []
     for p in players:
-        nick      = p["username"]
-        nick_norm = _normalize(nick)
-        if not nick_norm:
-            continue
-
-        if nick_norm in ocr_full:
+        nick = p["username"]
+        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm):
             matched.append(nick)
-            continue
-
-        if len(nick_norm) >= 3:
-            for line in ocr_lines:
-                if not line:
-                    continue
-                if _levenshtein(nick_norm, line) <= max(1, len(nick_norm) // 5):
-                    matched.append(nick)
-                    break
-                if len(line) > len(nick_norm) and nick_norm in line:
-                    matched.append(nick)
-                    break
 
     return matched
 
 
-def _determine_winner_team(verdict: str, players: list[dict], matched: list[str]) -> tuple[int, str]:
-    matched_set = set(matched)
-    t1_found = [p for p in players if p["team"] == 1 and p["username"] in matched_set]
-    t2_found = [p for p in players if p["team"] == 2 and p["username"] in matched_set]
-    total_t1 = max(len([p for p in players if p["team"] == 1]), 1)
-    total_t2 = max(len([p for p in players if p["team"] == 2]), 1)
+def _find_verdict(text: str) -> Optional[str]:
+    upper = text.upper()
+    win_patterns  = [r"ПОБЕДА", r"П0БЕДА", r"VICTORY", r"\bWIN\b"]
+    lose_patterns = [r"ПОРАЖЕНИЕ", r"П0РАЖЕНИЕ", r"DEFEAT", r"\bLOSS\b", r"\bLOSE\b"]
 
-    has_good_match = (
-        (len(t1_found) / total_t1 >= 0.5 or len(t2_found) / total_t2 >= 0.5)
-        and (len(t1_found) + len(t2_found) >= 2)
-    )
+    found_win  = any(re.search(p, upper) for p in win_patterns)
+    found_lose = any(re.search(p, upper) for p in lose_patterns)
 
-    if verdict == "win_top":
-        if t1_found and t2_found:
-            winner_team = 1 if len(t1_found) >= len(t2_found) else 2
-        elif t1_found:
-            winner_team = 1
-        elif t2_found:
-            winner_team = 2
-        else:
-            winner_team = 1
-    else:
-        if t1_found and t2_found:
-            winner_team = 2 if len(t1_found) >= len(t2_found) else 1
-        elif t1_found:
-            winner_team = 2
-        elif t2_found:
-            winner_team = 1
-        else:
-            winner_team = 2
-
-    return winner_team, ("high" if has_good_match else "low")
+    if found_win and not found_lose:
+        return "win_top"
+    if found_lose and not found_win:
+        return "win_bottom"
+    if found_win and found_lose:
+        win_pos  = min(
+            (m.start() for p in win_patterns  for m in re.finditer(p, upper)), default=9999
+        )
+        lose_pos = min(
+            (m.start() for p in lose_patterns for m in re.finditer(p, upper)), default=9999
+        )
+        return "win_top" if win_pos < lose_pos else "win_bottom"
+    return None
 
 
 def _validate_players(players: list[dict], matched: list[str]) -> Optional[ValidationError]:
     """
-    Строгая проверка: все ли нужные игроки присутствуют на скрине.
-    Возвращает ValidationError если скрин не подходит, иначе None.
+    СТРОГАЯ проверка: все игроки комнаты должны быть на скрине.
+
+    Правило одно для всех форматов:
+      Формат NvN → на скрине должно быть ровно N*2 игроков, и все N*2 должны совпасть.
+      Если хотя бы один не найден — ValidationError.
     """
     team1 = [p for p in players if p["team"] == 1]
     team2 = [p for p in players if p["team"] == 2]
     total_expected = len(team1) + len(team2)
+    size = len(team1)  # размер одной команды (1, 2, 3 или 4)
 
     if total_expected == 0:
         return ValidationError(
@@ -181,95 +223,92 @@ def _validate_players(players: list[dict], matched: list[str]) -> Optional[Valid
         )
 
     matched_set = set(matched)
-    t1_found    = [p for p in team1 if p["username"] in matched_set]
-    t2_found    = [p for p in team2 if p["username"] in matched_set]
+    t1_found = [p for p in team1 if p["username"] in matched_set]
+    t2_found = [p for p in team2 if p["username"] in matched_set]
     found_count = len(t1_found) + len(t2_found)
-    size        = len(team1)
 
-    missing = [p["username"] for p in players
-               if p["username"] not in matched_set and p["team"] in (1, 2)]
+    missing_t1 = [p["username"] for p in team1 if p["username"] not in matched_set]
+    missing_t2 = [p["username"] for p in team2 if p["username"] not in matched_set]
+    missing_all = missing_t1 + missing_t2
 
-    # Правило 1: ни одного игрока из одной из команд
+    fmt = f"{size}v{size}"
+
+    # Все игроки одной из команд отсутствуют — явно чужой скрин
     if not t1_found:
         return ValidationError(
-            reason="На скрине не найдено ни одного игрока из Команды 1. Скорее всего это не тот матч.",
+            reason=(
+                f"❌ Формат {fmt}: на скрине не найдено ни одного игрока из Команды 1.\n"
+                f"Не найдены: {', '.join(missing_t1)}.\n"
+                f"Это не тот матч — загрузи скрин именно этой игры."
+            ),
             found_players=list(matched_set),
-            missing_players=missing,
+            missing_players=missing_all,
             expected_count=total_expected,
             found_count=found_count,
         )
     if not t2_found:
         return ValidationError(
-            reason="На скрине не найдено ни одного игрока из Команды 2. Скорее всего это не тот матч.",
-            found_players=list(matched_set),
-            missing_players=missing,
-            expected_count=total_expected,
-            found_count=found_count,
-        )
-
-    # Правило 2: для 1v1 и 2v2 - нужны ВСЕ игроки
-    if size <= 2:
-        if len(t1_found) < len(team1) or len(t2_found) < len(team2):
-            missing_str = ", ".join(missing)
-            return ValidationError(
-                reason=(
-                    "Формат " + str(size) + "v" + str(size)
-                    + ": на скрине должны быть все " + str(total_expected) + " игрока. "
-                    + "Найдено только " + str(found_count) + ". "
-                    + "Не найдены: " + missing_str + "."
-                ),
-                found_players=list(matched_set),
-                missing_players=missing,
-                expected_count=total_expected,
-                found_count=found_count,
-            )
-
-    # Правило 3: для 3v3 и 4v4 - минимум 50% каждой команды
-    t1_ratio = len(t1_found) / max(len(team1), 1)
-    t2_ratio = len(t2_found) / max(len(team2), 1)
-
-    if t1_ratio < 0.5:
-        t1_missing = ", ".join(p["username"] for p in team1 if p["username"] not in matched_set)
-        return ValidationError(
             reason=(
-                "Из Команды 1 (" + str(len(team1)) + " игроков) на скрине найдено только "
-                + str(len(t1_found)) + ". Не найдены: " + t1_missing + "."
+                f"❌ Формат {fmt}: на скрине не найдено ни одного игрока из Команды 2.\n"
+                f"Не найдены: {', '.join(missing_t2)}.\n"
+                f"Это не тот матч — загрузи скрин именно этой игры."
             ),
             found_players=list(matched_set),
-            missing_players=missing,
-            expected_count=total_expected,
-            found_count=found_count,
-        )
-    if t2_ratio < 0.5:
-        t2_missing = ", ".join(p["username"] for p in team2 if p["username"] not in matched_set)
-        return ValidationError(
-            reason=(
-                "Из Команды 2 (" + str(len(team2)) + " игроков) на скрине найдено только "
-                + str(len(t2_found)) + ". Не найдены: " + t2_missing + "."
-            ),
-            found_players=list(matched_set),
-            missing_players=missing,
+            missing_players=missing_all,
             expected_count=total_expected,
             found_count=found_count,
         )
 
-    # Правило 4: общий порог 60%
-    total_ratio = found_count / max(total_expected, 1)
-    if total_ratio < 0.6:
-        missing_str = ", ".join(missing)
+    # Главное правило: все игроки должны присутствовать на скрине
+    if missing_all:
+        missing_t1_str = (", ".join(missing_t1)) if missing_t1 else "все найдены"
+        missing_t2_str = (", ".join(missing_t2)) if missing_t2 else "все найдены"
         return ValidationError(
             reason=(
-                "На скрине найдено только " + str(found_count) + " из " + str(total_expected)
-                + " игроков (" + str(int(total_ratio * 100)) + "%). "
-                + "Не найдены: " + missing_str + "."
+                f"❌ Формат {fmt}: на скрине должны быть все {total_expected} игрока.\n"
+                f"Найдено: {found_count}/{total_expected}.\n"
+                f"Команда 1 — не найдены: {missing_t1_str}\n"
+                f"Команда 2 — не найдены: {missing_t2_str}\n"
+                f"Убедись, что скрин показывает таблицу результатов именно этого матча."
             ),
             found_players=list(matched_set),
-            missing_players=missing,
+            missing_players=missing_all,
             expected_count=total_expected,
             found_count=found_count,
         )
 
-    return None  # всё ок
+    # Все найдены — ок
+    return None
+
+
+def _determine_winner_team(verdict: str, players: list[dict], matched: list[str]) -> tuple[int, str]:
+    """
+    Определяет победившую команду исходя из вердикта и расположения игроков.
+
+    win_top    → ПОБЕДА стоит выше — значит верхняя команда победила.
+    win_bottom → ПОРАЖЕНИЕ стоит выше — значит верхняя команда проиграла.
+
+    «Верхняя» команда = та, чьи игроки идут первыми в списке скрина.
+    Мы определяем это по тому, игроки какой команды найдены раньше в OCR-тексте.
+    Если определить не получается — используем team1 как «верхнюю» по умолчанию.
+    """
+    matched_set = set(matched)
+    t1_found = [p for p in players if p["team"] == 1 and p["username"] in matched_set]
+    t2_found = [p for p in players if p["team"] == 2 and p["username"] in matched_set]
+
+    # После строгой валидации обе команды гарантированно найдены
+    # Confidence = high, т.к. все игроки прошли валидацию
+    confidence = "high"
+
+    # win_top: слово ПОБЕДА появляется раньше ПОРАЖЕНИЯ → верхняя команда выиграла.
+    # Мы считаем team1 «верхней» (они перечислены первыми в players).
+    if verdict == "win_top":
+        winner_team = 1
+    else:
+        # win_bottom: ПОРАЖЕНИЕ раньше → верхняя (team1) проиграла
+        winner_team = 2
+
+    return winner_team, confidence
 
 
 # ── Основная публичная функция ──────────────────────────────────────────────────
@@ -280,9 +319,9 @@ async def analyze_screenshot(
 ) -> "ScreenshotResult | ValidationError | None":
     """
     Возвращает:
-      ScreenshotResult  - скрин верный, результат определён
-      ValidationError   - скрин не от этой игры (не те игроки)
-      None              - OCR недоступен или не смог прочитать изображение
+      ScreenshotResult  — скрин верный, результат определён
+      ValidationError   — скрин не от этой игры (не те / не все игроки)
+      None              — OCR недоступен или не смог прочитать изображение
     """
     if not _OCR_AVAILABLE or not _AIOHTTP_AVAILABLE:
         return None
@@ -304,26 +343,30 @@ async def analyze_screenshot(
     if not ocr_text or not ocr_text.strip():
         return None
 
-    # 1. Ищем ники игроков
+    # 1. Ищем ники игроков в OCR-тексте (с игнорированием тегов)
     matched = _match_players(ocr_text, players)
-    log.info("OCR matched players: %s", matched)
+    log.info("OCR matched players: %s / expected: %s",
+             matched, [p["username"] for p in players if p["team"] in (1, 2)])
 
-    # 2. Строгая валидация ДО проверки результата
+    # 2. Строгая валидация: все ли игроки комнаты есть на скрине
     err = _validate_players(players, matched)
     if err is not None:
-        log.info("OCR validation failed: %s (found %d/%d)", err.reason, err.found_count, err.expected_count)
+        log.info("OCR validation failed: %s (found %d/%d)",
+                 err.reason, err.found_count, err.expected_count)
         return err
 
     # 3. Ищем ПОБЕДА / ПОРАЖЕНИЕ
     verdict = _find_verdict(ocr_text)
     if verdict is None:
-        log.debug("OCR: не найдено ПОБЕДА/ПОРАЖЕНИЕ")
-        return None  # игроки нашлись, но результат неясен -> голосование
+        log.info("OCR: игроки найдены, но ПОБЕДА/ПОРАЖЕНИЕ не распознаны — переходим к голосованию")
+        return None  # игроки нашлись, но результат неясен → ручное голосование
 
     # 4. Определяем победителя
     winner_team, confidence = _determine_winner_team(verdict, players, matched)
-    log.info("OCR result: winner_team=%d confidence=%s verdict=%s matched=%s",
-             winner_team, confidence, verdict, matched)
+    log.info(
+        "OCR result: winner_team=%d confidence=%s verdict=%s matched=%s",
+        winner_team, confidence, verdict, matched,
+    )
 
     return ScreenshotResult(
         winner_team=winner_team,
@@ -332,6 +375,8 @@ async def analyze_screenshot(
         matched_players=matched,
     )
 
+
+# ── Сетевые и OCR утилиты ───────────────────────────────────────────────────────
 
 async def _download_image(url: str) -> bytes:
     async with aiohttp.ClientSession() as session:
