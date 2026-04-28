@@ -3115,14 +3115,31 @@ class Rooms(commands.Cog):
                 except Exception:
                     pass
 
-        # Удаляем embed из канала результатов
-        if match_row and match_row["result_message_id"] and match_row["result_channel_id"]:
+        # Удаляем embed из канала результатов + сообщения со скринами этого матча
+        if match_row and match_row["result_channel_id"]:
             try:
                 results_ch = guild.get_channel(match_row["result_channel_id"])
                 if results_ch:
-                    old_msg = await results_ch.fetch_message(match_row["result_message_id"])
-                    await old_msg.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    # Удаляем embed результатов
+                    if match_row["result_message_id"]:
+                        try:
+                            old_msg = await results_ch.fetch_message(match_row["result_message_id"])
+                            await old_msg.delete()
+                        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                            pass
+                    # Удаляем сообщения со скринами этого матча.
+                    # Они отправляются с текстом содержащим "Матч #{game_id}".
+                    screenshot_marker = f"Матч #{game_id}"
+                    try:
+                        async for msg in results_ch.history(limit=100):
+                            if msg.author == self.bot.user and screenshot_marker in msg.content:
+                                try:
+                                    await msg.delete()
+                                except (discord.NotFound, discord.Forbidden):
+                                    pass
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+            except Exception:
                 pass
 
         # Формируем отчёт
