@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import subprocess
 
 import discord
 from discord.ext import commands
@@ -12,6 +13,21 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("bot")
+
+# ── Проверка Tesseract при старте ──────────────────────────────────────────────
+try:
+    r = subprocess.run(["tesseract", "--version"], capture_output=True, text=True)
+    version_line = r.stdout.splitlines()[0] if r.stdout else r.stderr.splitlines()[0] if r.stderr else "NO OUTPUT"
+    log.warning(f"Tesseract version: {version_line}")
+
+    r2 = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True)
+    langs_out = (r2.stdout + r2.stderr).strip()
+    log.warning(f"Tesseract langs:\n{langs_out}")
+except FileNotFoundError:
+    log.warning("Tesseract NOT FOUND — OCR анализ скриншотов недоступен. Проверь nixpacks.toml")
+except Exception as e:
+    log.warning(f"Tesseract check error: {e}")
+# ───────────────────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
@@ -67,9 +83,6 @@ async def _register_persistent_views():
             message_id=embed_msg_id,
         )
 
-        # Регистрируем JoinRoomView для всех активных комнат:
-        # - waiting: кнопка Join активна (is_full=False)
-        # - full/picking/started: кнопка задисейблена (is_full=True), но view нужен для восстановления
         is_full = status != "waiting"
         bot.add_view(JoinRoomView(room_id, size, mode, is_full=is_full))
 
@@ -183,8 +196,6 @@ async def main():
         for cog in COGS:
             await bot.load_extension(cog)
             log.info(f"Loaded {cog}")
-        # Регистрируем persistent views ПОСЛЕ загрузки когов но ДО bot.start()
-        # Это гарантирует: 1) импорты работают  2) views зарегистрированы до первого interaction
         await _register_persistent_views()
         await bot.start(Config.TOKEN)
 
