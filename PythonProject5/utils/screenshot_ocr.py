@@ -142,11 +142,17 @@ def _extract_ocr_names(ocr_text: str) -> list[str]:
     """
     Извлекает «чистые» ники из OCR-текста.
 
+    Структура строки таблицы результатов:
+        [TAG] НИК   GS   СЧЁТ   У   П   У/П   ...
+    Ник всегда стоит ПЕРВЫМ после кланового тега, затем идут числа (GS и др.).
+    Поэтому берём только ПЕРВЫЙ непустой токен после стриппинга тега.
+
     Для каждой строки:
       1. Убираем клановый тег (всё что в [] {} () в начале строки,
          в том числе если OCR не распознал открывающую скобку: "D.3s] alekz").
-      2. Добавляем ВСЕ токены строки — ник может стоять не первым словом.
-      3. Нормализуем каждый токен.
+      2. Берём ТОЛЬКО ПЕРВЫЙ токен после тега — это и есть ник.
+         Все последующие токены (числа GS, счёт и т.д.) игнорируем.
+      3. Нормализуем токен.
 
     Возвращаем список нормализованных кандидатов (без дублей).
     """
@@ -159,13 +165,12 @@ def _extract_ocr_names(ocr_text: str) -> list[str]:
         clean = _strip_tag(line)
         if not clean:
             continue
-        # Добавляем ВСЕ токены строки — ник может быть не первым словом
-        # (например, если OCR не убрал тег и строка выглядит как "D.3s alekz 9999")
-        tokens = re.split(r"[\s\t]+", clean)
-        for tok in tokens:
-            tok_norm = _normalize(tok)
-            if len(tok_norm) >= 2:
-                candidates.add(tok_norm)
+        # Берём ТОЛЬКО первый токен — это ник.
+        # Остальные токены — числа (GS, счёт, убийства и т.д.), нам не нужны.
+        first_token = re.split(r"[\s\t]+", clean)[0]
+        tok_norm = _normalize(first_token)
+        if len(tok_norm) >= 2:
+            candidates.add(tok_norm)
     return list(candidates)
 
 
@@ -322,13 +327,14 @@ def _validate_players(players: list[dict], matched: list[str], ocr_text: str | N
             "победа", "поражение", "victory", "defeat", "win", "lose", "loss",
             "draw", "ничья", "ctf", "песочница", "sandbox", "team", "команда",
             "rating", "рейтинг", "place", "место", "all", "total",
+            # заголовки колонок таблицы результатов
+            "уп", "yn", "пн", "имяс", "names",
         }
         nick_like = [
             c for c in ocr_candidates
-            if len(c) >= 3
-            and not c.isdigit()
+            if len(c) >= 2
+            and not re.fullmatch(r"[\d.,]+", c)
             and c not in _SERVICE
-            and not re.fullmatch(r"\d+", c)
         ]
         total_on_screen = len(nick_like)
 
