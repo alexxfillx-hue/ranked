@@ -67,6 +67,17 @@ class ValidationError:
     found_count: int = 0
 
 
+@dataclass
+class ManualVoteNeeded:
+    """
+    OCR нашёл всех игроков на скрине, но не смог определить победителя
+    (ПОБЕДА/ПОРАЖЕНИЕ не распознаны). Требуется ручное голосование.
+    """
+    matched_players: list[str] = field(default_factory=list)
+    found_count: int = 0
+    expected_count: int = 0
+
+
 # ── Вспомогательные функции ─────────────────────────────────────────────────────
 
 def _normalize(s: str) -> str:
@@ -75,14 +86,41 @@ def _normalize(s: str) -> str:
     return re.sub(r"[^\w]", "", s, flags=re.UNICODE)
 
 
-# Паттерн тегов: [TAG], {TAG}, (TAG) перед именем — захватываем только имя после тега.
-# Примеры: "[D.3s] alekz" -> "alekz", "[Rove] psykos" -> "psykos", "Mursal" -> "Mursal"
-_TAG_RE = re.compile(r"^(?:\[.*?\]|\{.*?\}|\(.*?\)|[^\s]*[\]}\)])\s*")
+# Паттерн тегов вида: [D.3s] alekz, {TAG} nick, (TAG) nick
+# Также обрабатывает случаи когда OCR «потерял» открывающую скобку: "D.3s] alekz"
+# Примеры:
+#   "[D.3s] alekz"  -> "alekz"
+#   "D.3s] alekz"   -> "alekz"   (OCR не распознал '[')
+#   "{Rove} psykos" -> "psykos"
+#   "(CL) nick"     -> "nick"
+#   "TAG. nick"     -> "nick"     (тег с точкой без скобок)
+#   "Mursal"        -> "Mursal"   (без тега — не трогаем)
+_TAG_RE = re.compile(
+    r"^(?:"
+    r"\[.*?\]"          # [TAG]
+    r"|\{.*?\}"         # {TAG}
+    r"|\(.*?\)"         # (TAG)
+    r"|[^\s]*\]"        # D.3s]  (OCR потерял '[')
+    r"|[^\s]*\}"        # D.3s}  (OCR потерял '{')
+    r"|[^\s]*\)"        # D.3s)  (OCR потерял '(')
+    r")\s*",
+    re.UNICODE,
+)
 
 
 def _strip_tag(name: str) -> str:
-    """Убирает клановый тег из начала имени игрока."""
-    return _TAG_RE.sub("", name).strip()
+    """
+    Убирает клановый тег из начала имени игрока.
+    Применяет паттерн повторно — на случай если тегов несколько
+    или OCR склеил несколько слов в одно поле.
+    """
+    # Применяем паттерн до тех пор пока он что-то убирает (макс. 3 итерации)
+    for _ in range(3):
+        cleaned = _TAG_RE.sub("", name).strip()
+        if cleaned == name:
+            break
+        name = cleaned
+    return name
 
 
 def _levenshtein(a: str, b: str) -> int:
@@ -358,11 +396,12 @@ def _determine_winner_team(verdict: str, players: list[dict], matched: list[str]
 async def analyze_screenshot(
     image_url: str,
     players: list[dict],
-) -> "ScreenshotResult | ValidationError | None":
+) -> "ScreenshotResult | ValidationError | ManualVoteNeeded | None":
     """
     Возвращает:
-      ScreenshotResult  — скрин верный, результат определён
+      ScreenshotResult  — скрин верный, результат определён автоматически
       ValidationError   — скрин не от этой игры (не те / не все игроки)
+      ManualVoteNeeded  — все игроки найдены, но ПОБЕДА/ПОРАЖЕНИЕ не распознаны
       None              — OCR недоступен или не смог прочитать изображение
     """
     if not _OCR_AVAILABLE or not _AIOHTTP_AVAILABLE:
@@ -387,8 +426,9 @@ async def analyze_screenshot(
 
     # 1. Ищем ники игроков в OCR-тексте (с игнорированием тегов)
     matched = _match_players(ocr_text, players)
+    team_players = [p for p in players if p["team"] in (1, 2)]
     log.info("OCR matched players: %s / expected: %s",
-             matched, [p["username"] for p in players if p["team"] in (1, 2)])
+             matched, [p["username"] for p in team_players])
 
     # 2. Строгая валидация: все ли игроки комнаты есть на скрине
     err = _validate_players(players, matched, ocr_text)
@@ -400,8 +440,16 @@ async def analyze_screenshot(
     # 3. Ищем ПОБЕДА / ПОРАЖЕНИЕ
     verdict = _find_verdict(ocr_text)
     if verdict is None:
-        log.info("OCR: игроки найдены, но ПОБЕДА/ПОРАЖЕНИЕ не распознаны — переходим к голосованию")
-        return None  # игроки нашлись, но результат неясен → ручное голосование
+        # Все игроки найдены, но результат неясен → ручное голосование
+        log.info(
+            "OCR: все игроки найдены (%d/%d), но ПОБЕДА/ПОРАЖЕНИЕ не распознаны — запрашиваем голосование",
+            len(matched), len(team_players),
+        )
+        return ManualVoteNeeded(
+            matched_players=matched,
+            found_count=len(matched),
+            expected_count=len(team_players),
+        )
 
     # 4. Определяем победителя
     winner_team, confidence = _determine_winner_team(verdict, players, matched)
