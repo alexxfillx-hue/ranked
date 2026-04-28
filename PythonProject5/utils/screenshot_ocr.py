@@ -247,52 +247,45 @@ def _find_verdict(text: str) -> Optional[str]:
 
 
 
-def _count_player_rows(ocr_text: str) -> int:
+def _count_nicks_on_screenshot(ocr_text: str, all_known_players: list[dict]) -> int:
     """
-    Считает количество строк с игроками в OCR-тексте.
+    Считает количество ников игроков на скрине, сравнивая OCR-строки со ВСЕМИ
+    зарегистрированными игроками комнаты (независимо от команды).
 
-    Признак строки игрока — наличие GS-рейтинга (число вида "N NNN" или "NNNN",
-    значение 1000–9999). Заголовки таблицы и пустые строки пропускаются.
-    Используется для проверки что скрин содержит ровно N*2 игроков.
+    Алгоритм:
+      1. Для каждой строки OCR убираем тег и получаем «чистый» токен.
+      2. Проверяем совпадает ли токен (точно или через Левенштейна) с ником
+         любого из известных игроков комнаты.
+      3. Считаем уникальные совпадения — каждый ник считается только раз.
 
-    Возвращает -1 если не удалось надёжно посчитать (OCR не нашёл ни одного числа
-    похожего на GS-рейтинг) — в этом случае проверка количества пропускается.
+    Возвращает количество уникальных ников комнаты найденных на скрине.
+    Если ни одного совпадения — возвращает 0 (проверку количества пропускаем).
     """
-    count = 0
-    any_number_found = False
-    for raw_line in ocr_text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        # Пропускаем строки заголовков таблицы
-        header_keywords = ("ИМЯ", "GS", "СЧЁТ", "СЧЕТ", "У/П", "NAME", "SCORE", "K/D", "KDA")
-        if any(kw in line.upper() for kw in header_keywords):
-            continue
-        # Паттерн GS: "9 999" (цифра, пробел, три цифры) или "9999" (4 цифры слитно)
-        # Также учитываем OCR-артефакты: неразрывные пробелы (\xa0), точки вместо пробелов
-        normalized_line = line.replace("\xa0", " ").replace(".", " ")
-        has_gs = (
-            re.search(r"\b[1-9]\s\d{3}\b", normalized_line)
-            or re.search(r"\b[1-9]\d{3}\b", normalized_line)
-        )
-        if has_gs:
-            any_number_found = True
-            count += 1
+    ocr_candidates = _extract_ocr_names(ocr_text)
+    ocr_full_norm = _normalize(ocr_text)
 
-    # Если ни одного GS-числа не найдено — OCR не смог прочитать таблицу надёжно
-    # Возвращаем -1 чтобы _validate_players пропустил эту проверку
-    if not any_number_found:
-        return -1
-    return count
+    found_nicks = set()
+    for p in all_known_players:
+        nick = p["username"]
+        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm):
+            found_nicks.add(nick)
+
+    return len(found_nicks)
 
 
 def _validate_players(players: list[dict], matched: list[str], ocr_text: str | None = None) -> Optional[ValidationError]:
     """
-    СТРОГАЯ проверка: все игроки комнаты должны быть на скрине.
+    СТРОГАЯ проверка скрина:
 
-    Правило одно для всех форматов:
-      Формат NvN → на скрине должно быть ровно N*2 игроков, и все N*2 должны совпасть.
-      Если хотя бы один не найден — ValidationError.
+    Шаг 1 — Считаем сколько ников из комнаты есть на скрине.
+             Если их БОЛЬШЕ чем нужно для формата (size*2) — чужой скрин, отклоняем.
+             Если их МЕНЬШЕ — не все игроки найдены, отклоняем.
+
+    Шаг 2 — Проверяем что найдены игроки ОБЕИХ команд.
+
+    Шаг 3 — Проверяем что ВСЕ игроки комнаты присутствуют на скрине.
+
+    Формат NvN → на скрине должно быть ровно N*2 ников этого матча, все совпавшие.
     """
     team1 = [p for p in players if p["team"] == 1]
     team2 = [p for p in players if p["team"] == 2]
@@ -306,40 +299,49 @@ def _validate_players(players: list[dict], matched: list[str], ocr_text: str | N
             found_count=0,
         )
 
-    # Проверяем количество строк игроков на скрине.
-    # Скрин должен содержать ровно size*2 строк с игроками — не больше, не меньше.
-    # Это защищает от скринов с другим форматом (например, 4v4 скрин при комнате 1v1).
+    # ── Шаг 1: проверка количества ников на скрине ──────────────────────────
+    # Считаем сколько ников из этой комнаты OCR нашёл на скрине.
+    # Если больше чем нужно → скрин от другого матча (больше игроков).
+    # Например: 1v1 комната (2 игрока), но на скрине найдены 3 ника из комнаты
+    # (такое возможно если в комнате были все 3 как known_players).
+    # Ключевой случай: все игроки комнаты + чужой игрок → matched == total_expected,
+    # но _count_nicks_on_screenshot вернёт total_expected т.к. чужой не в списке.
+    # Поэтому главная защита — сравнение matched с total_expected СТРОГО (==).
     if ocr_text is not None:
-        rows_on_screenshot = _count_player_rows(ocr_text)
-        # -1 означает что OCR не смог надёжно посчитать строки — пропускаем проверку
-        # 0 тоже означает что паттерны GS не нашлись — пропускаем
-        if rows_on_screenshot > 0 and rows_on_screenshot != total_expected:
+        nicks_found = _count_nicks_on_screenshot(ocr_text, players)
+        # nicks_found > total_expected невозможно (мы ищем только по players),
+        # но nicks_found < total_expected значит не все нашлись.
+        # Главное: если на скрине ВИДНО больше ников чем в комнате — OCR распознал
+        # чужих игроков, они просто не попали в matched. Проверяем через ocr_candidates:
+        ocr_candidates = _extract_ocr_names(ocr_text)
+        # Фильтруем мусорные токены: оставляем только «никоподобные» —
+        # длина ≥ 3, нет чисто числовых, нет служебных слов
+        _SERVICE = {
+            "gs", "имя", "name", "счёт", "счет", "score", "убийства",
+            "смерти", "помощь", "kills", "deaths", "assists", "kda", "yd",
+            "победа", "поражение", "victory", "defeat", "win", "lose", "loss",
+            "draw", "ничья", "ctf", "песочница", "sandbox", "team", "команда",
+            "rating", "рейтинг", "place", "место", "all", "total",
+        }
+        nick_like = [
+            c for c in ocr_candidates
+            if len(c) >= 3
+            and not c.isdigit()
+            and c not in _SERVICE
+            and not re.fullmatch(r"\d+", c)
+        ]
+        total_on_screen = len(nick_like)
+
+        if total_on_screen > total_expected:
             return ValidationError(
                 reason=(
-                    f"❌ Формат {size}v{size}: на скрине обнаружено **{rows_on_screenshot}** строк игроков, "
-                    f"а должно быть ровно **{total_expected}**. "
-                    f"Это скрин другого матча — загрузи скрин именно этой игры ({size}v{size})."
+                    f"❌ Формат {size}v{size}: на скрине найдено **{total_on_screen}** ников, "
+                    f"а в этом матче должно быть ровно **{total_expected}**. "
+                    f"Загрузи скрин именно этой игры ({size}v{size})."
                 ),
                 expected_count=total_expected,
-                found_count=0,
+                found_count=nicks_found,
             )
-
-    # Дополнительная проверка: считаем уникальных игроков найденных в OCR.
-    # Если OCR нашёл БОЛЬШЕ игроков чем ожидается в формате — отклоняем скрин.
-    # Это защищает от случая когда _count_player_rows не сработал (OCR не распознал GS),
-    # но при этом в OCR-тексте реально видно больше ников чем должно быть.
-    if len(matched) > total_expected:
-        return ValidationError(
-            reason=(
-                f"❌ Формат {size}v{size}: распознано **{len(matched)}** игроков, "
-                f"хотя в этом матче должно быть ровно **{total_expected}**. "
-                f"Это скрин другого матча — загрузи скрин именно этой игры ({size}v{size})."
-            ),
-            found_players=matched,
-            missing_players=[],
-            expected_count=total_expected,
-            found_count=len(matched),
-        )
 
     matched_set = set(matched)
     t1_found = [p for p in team1 if p["username"] in matched_set]
