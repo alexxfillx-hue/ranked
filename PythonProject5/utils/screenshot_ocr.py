@@ -77,7 +77,7 @@ def _normalize(s: str) -> str:
 
 # Паттерн тегов: [TAG], {TAG}, (TAG) перед именем — захватываем только имя после тега.
 # Примеры: "[D.3s] alekz" -> "alekz", "[Rove] psykos" -> "psykos", "Mursal" -> "Mursal"
-_TAG_RE = re.compile(r"^(?:\[.*?\]|\{.*?\}|\(.*?\))\s*")
+_TAG_RE = re.compile(r"^(?:\[.*?\]|\{.*?\}|\(.*?\)|[^\s]*[\]}\)])\s*")
 
 
 def _strip_tag(name: str) -> str:
@@ -105,9 +105,10 @@ def _extract_ocr_names(ocr_text: str) -> list[str]:
     Извлекает «чистые» ники из OCR-текста.
 
     Для каждой строки:
-      1. Убираем клановый тег (всё что в [] {} () в начале строки).
-      2. Берём первое «слово» как потенциальный ник.
-      3. Нормализуем.
+      1. Убираем клановый тег (всё что в [] {} () в начале строки,
+         в том числе если OCR не распознал открывающую скобку: "D.3s] alekz").
+      2. Добавляем ВСЕ токены строки — ник может стоять не первым словом.
+      3. Нормализуем каждый токен.
 
     Возвращаем список нормализованных кандидатов (без дублей).
     """
@@ -116,19 +117,17 @@ def _extract_ocr_names(ocr_text: str) -> list[str]:
         line = raw_line.strip()
         if not line:
             continue
-        # Убираем тег
+        # Убираем тег из начала строки
         clean = _strip_tag(line)
         if not clean:
             continue
-        # Берём первый «токен» (до пробела, табуляции, цифры-столбца и т.п.)
-        token = re.split(r"[\s\t]", clean)[0]
-        token_norm = _normalize(token)
-        if len(token_norm) >= 2:
-            candidates.add(token_norm)
-        # Также добавляем всю строку без тега (на случай ника с пробелом)
-        full_norm = _normalize(clean.split()[0]) if clean.split() else ""
-        if full_norm and len(full_norm) >= 2:
-            candidates.add(full_norm)
+        # Добавляем ВСЕ токены строки — ник может быть не первым словом
+        # (например, если OCR не убрал тег и строка выглядит как "D.3s alekz 9999")
+        tokens = re.split(r"[\s\t]+", clean)
+        for tok in tokens:
+            tok_norm = _normalize(tok)
+            if len(tok_norm) >= 2:
+                candidates.add(tok_norm)
     return list(candidates)
 
 
