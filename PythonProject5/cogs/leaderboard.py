@@ -165,52 +165,96 @@ class Leaderboard(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.command(name="plus")
-    async def mod_plus(self, ctx: commands.Context, member: discord.Member, amount: int):
+    async def mod_plus(self, ctx: commands.Context, member: discord.Member = None, amount: int = None):
         if not self._is_guild(ctx):
             return
         from config import Config as _C
         if not any(r.name == _C.MODERATOR_ROLE_NAME for r in ctx.author.roles) and \
            not ctx.author.guild_permissions.administrator:
-            await ctx.send("❌ No permission. Moderators only.")
+            await ctx.send("❌ Нет прав. Только для модераторов.")
+            return
+        if member is None or amount is None:
+            await ctx.send("Использование: `!plus @игрок <кол-во>`  пример: `!plus @alekz 50`")
             return
         if amount <= 0:
-            await ctx.send("❌ Please specify a positive number.")
+            await ctx.send("❌ Количество должно быть положительным числом.")
             return
+        player = await self.bot.db.get_player(member.id)
+        if not player:
+            await ctx.send(f"❌ {member.mention} не зарегистрирован.")
+            return
+        old_elo = player["elo"]
         new_elo = await self.bot.db.mod_adjust_elo(member.id, amount)
         if new_elo == -1:
-            await ctx.send("❌ Player is not registered.")
+            await ctx.send("❌ Игрок не зарегистрирован.")
             return
+        from config import get_rank
+        old_rank, _ = get_rank(old_elo)
+        new_rank, _ = get_rank(new_elo)
         from cogs.register import Register
         reg_cog: Register = self.bot.cogs.get("Register")
-        if reg_cog and ctx.guild:
-            m = ctx.guild.get_member(member.id)
-            if m:
-                await reg_cog._sync_rank_role(m, new_elo)
-        await ctx.send(f"✅ **{member.display_name}** +{amount} ELO → **{new_elo}** ELO")
+        m = ctx.guild.get_member(member.id)
+        if reg_cog and m:
+            await reg_cog._sync_rank_role(m, new_elo)
+        if old_rank != new_rank:
+            rooms_cog = self.bot.cogs.get("Rooms")
+            if rooms_cog and m:
+                await rooms_cog._announce_rank_change(ctx.guild, m, new_rank, new_elo, old_rank=old_rank)
+        embed = discord.Embed(title="📈 ELO скорректировано", color=0x57F287)
+        embed.add_field(name="Игрок", value=member.mention, inline=True)
+        embed.add_field(name="Изменение", value=f"`+{amount}`", inline=True)
+        embed.add_field(name="ELO", value=f"{old_elo} → **{new_elo}**", inline=True)
+        if old_rank != new_rank:
+            embed.add_field(name="Ранг", value=f"{old_rank} → **{new_rank}**", inline=False)
+        embed.set_footer(text=f"Модератор: {ctx.author.display_name}")
+        embed.timestamp = discord.utils.utcnow()
+        await ctx.send(embed=embed)
 
     @commands.command(name="minus")
-    async def mod_minus(self, ctx: commands.Context, member: discord.Member, amount: int):
+    async def mod_minus(self, ctx: commands.Context, member: discord.Member = None, amount: int = None):
         if not self._is_guild(ctx):
             return
         from config import Config as _C
         if not any(r.name == _C.MODERATOR_ROLE_NAME for r in ctx.author.roles) and \
            not ctx.author.guild_permissions.administrator:
-            await ctx.send("❌ No permission. Moderators only.")
+            await ctx.send("❌ Нет прав. Только для модераторов.")
+            return
+        if member is None or amount is None:
+            await ctx.send("Использование: `!minus @игрок <кол-во>`  пример: `!minus @alekz 50`")
             return
         if amount <= 0:
-            await ctx.send("❌ Please specify a positive number.")
+            await ctx.send("❌ Количество должно быть положительным числом.")
             return
+        player = await self.bot.db.get_player(member.id)
+        if not player:
+            await ctx.send(f"❌ {member.mention} не зарегистрирован.")
+            return
+        old_elo = player["elo"]
         new_elo = await self.bot.db.mod_adjust_elo(member.id, -amount)
         if new_elo == -1:
-            await ctx.send("❌ Player is not registered.")
+            await ctx.send("❌ Игрок не зарегистрирован.")
             return
+        from config import get_rank
+        old_rank, _ = get_rank(old_elo)
+        new_rank, _ = get_rank(new_elo)
         from cogs.register import Register
         reg_cog: Register = self.bot.cogs.get("Register")
-        if reg_cog and ctx.guild:
-            m = ctx.guild.get_member(member.id)
-            if m:
-                await reg_cog._sync_rank_role(m, new_elo)
-        await ctx.send(f"✅ **{member.display_name}** -{amount} ELO → **{new_elo}** ELO")
+        m = ctx.guild.get_member(member.id)
+        if reg_cog and m:
+            await reg_cog._sync_rank_role(m, new_elo)
+        if old_rank != new_rank:
+            rooms_cog = self.bot.cogs.get("Rooms")
+            if rooms_cog and m:
+                await rooms_cog._announce_rank_change(ctx.guild, m, new_rank, new_elo, old_rank=old_rank)
+        embed = discord.Embed(title="📉 ELO скорректировано", color=0xED4245)
+        embed.add_field(name="Игрок", value=member.mention, inline=True)
+        embed.add_field(name="Изменение", value=f"`-{amount}`", inline=True)
+        embed.add_field(name="ELO", value=f"{old_elo} → **{new_elo}**", inline=True)
+        if old_rank != new_rank:
+            embed.add_field(name="Ранг", value=f"{old_rank} → **{new_rank}**", inline=False)
+        embed.set_footer(text=f"Модератор: {ctx.author.display_name}")
+        embed.timestamp = discord.utils.utcnow()
+        await ctx.send(embed=embed)
 
     @commands.command(name="rules")
     async def rules(self, ctx: commands.Context):
