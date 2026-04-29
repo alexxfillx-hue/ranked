@@ -545,13 +545,13 @@ class Leaderboard(commands.Cog):
         # Best duo
         best_duo = [r for r in teammate_rows if r["wins"] > 0][:5]
         if best_duo:
-            lines = [f"• **{r['username']}** — {r['wins']} wins together ({r['total']} games)" for r in best_duo]
+            lines = [f"• **{r['username']}** — {r['wins']} wins together" for r in best_duo]
             embed.add_field(name="🤝 Best duo", value="\n".join(lines), inline=False)
 
         # Best trio
         if trio_rows:
             lines = [
-                f"• **{r['teammate1_name']}** & **{r['teammate2_name']}** — {r['wins']} wins together ({r['total']} games)"
+                f"• **{r['teammate1_name']}** & **{r['teammate2_name']}** — {r['wins']} wins together"
                 for r in trio_rows
             ]
             embed.add_field(name="👑 Best trio", value="\n".join(lines), inline=False)
