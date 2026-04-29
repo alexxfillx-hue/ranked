@@ -670,26 +670,29 @@ class Database:
 
     async def get_teammate_stats(self, discord_id: int) -> list[_Row]:
         """
-        Статистика с тиммейтами — восстанавливается из game_results:
-        два игрока тиммейты если у них одинаковый game_id И одинаковый result.
-        Покрывает все исторические игры без отдельной таблицы.
+        Статистика с тиммейтами — восстанавливается из game_results.
+        Два игрока тиммейты если у них одинаковый game_id И одинаковый result.
+        Используем DISTINCT game_id чтобы не множить на количество оппонентов.
         """
         rows = await self.pool.fetch(
             """SELECT
-                g2.discord_id   AS teammate_id,
-                p.username,
-                COUNT(*) FILTER (WHERE g1.result = 'win')  AS wins,
-                COUNT(*) FILTER (WHERE g1.result = 'lose') AS losses,
-                COUNT(*) FILTER (WHERE g1.result = 'draw') AS draws,
-                COUNT(*)                                    AS total
-               FROM game_results g1
-               JOIN game_results g2
-                 ON g1.game_id = g2.game_id
-                AND g1.result  = g2.result
-                AND g2.discord_id != $1
-               JOIN players p ON p.discord_id = g2.discord_id
-               WHERE g1.discord_id = $1
-               GROUP BY g2.discord_id, p.username
+                teammate_id,
+                username,
+                COUNT(*) FILTER (WHERE result = 'win')  AS wins,
+                COUNT(*) FILTER (WHERE result = 'lose') AS losses,
+                COUNT(*) FILTER (WHERE result = 'draw') AS draws,
+                COUNT(*)                                 AS total
+               FROM (
+                   SELECT DISTINCT g1.game_id, g2.discord_id AS teammate_id, p.username, g1.result
+                   FROM game_results g1
+                   JOIN game_results g2
+                     ON g1.game_id = g2.game_id
+                    AND g1.result  = g2.result
+                    AND g2.discord_id != $1
+                   JOIN players p ON p.discord_id = g2.discord_id
+                   WHERE g1.discord_id = $1
+               ) sub
+               GROUP BY teammate_id, username
                ORDER BY wins DESC, total DESC""",
             discord_id,
         )
@@ -698,30 +701,39 @@ class Database:
     async def get_trio_stats(self, discord_id: int) -> list[_Row]:
         """
         Лучшее трио — два тиммейта с которыми вместе больше всего побед.
-        Восстанавливается из game_results без отдельной таблицы.
+        DISTINCT game_id чтобы не множить на количество оппонентов.
         """
         rows = await self.pool.fetch(
             """SELECT
-                g2.discord_id AS teammate1_id,
-                p1.username   AS teammate1_name,
-                g3.discord_id AS teammate2_id,
-                p2.username   AS teammate2_name,
-                COUNT(*) FILTER (WHERE g1.result = 'win') AS wins,
-                COUNT(*)                                   AS total
-               FROM game_results g1
-               JOIN game_results g2
-                 ON g1.game_id = g2.game_id
-                AND g1.result  = g2.result
-                AND g2.discord_id != $1
-               JOIN game_results g3
-                 ON g1.game_id = g3.game_id
-                AND g1.result  = g3.result
-                AND g3.discord_id != $1
-                AND g3.discord_id > g2.discord_id
-               JOIN players p1 ON p1.discord_id = g2.discord_id
-               JOIN players p2 ON p2.discord_id = g3.discord_id
-               WHERE g1.discord_id = $1
-               GROUP BY g2.discord_id, p1.username, g3.discord_id, p2.username
+                teammate1_id,
+                teammate1_name,
+                teammate2_id,
+                teammate2_name,
+                COUNT(*) FILTER (WHERE result = 'win') AS wins,
+                COUNT(*)                                AS total
+               FROM (
+                   SELECT DISTINCT
+                       g1.game_id,
+                       g1.result,
+                       g2.discord_id AS teammate1_id,
+                       p1.username   AS teammate1_name,
+                       g3.discord_id AS teammate2_id,
+                       p2.username   AS teammate2_name
+                   FROM game_results g1
+                   JOIN game_results g2
+                     ON g1.game_id = g2.game_id
+                    AND g1.result  = g2.result
+                    AND g2.discord_id != $1
+                   JOIN game_results g3
+                     ON g1.game_id = g3.game_id
+                    AND g1.result  = g3.result
+                    AND g3.discord_id != $1
+                    AND g3.discord_id > g2.discord_id
+                   JOIN players p1 ON p1.discord_id = g2.discord_id
+                   JOIN players p2 ON p2.discord_id = g3.discord_id
+                   WHERE g1.discord_id = $1
+               ) sub
+               GROUP BY teammate1_id, teammate1_name, teammate2_id, teammate2_name
                ORDER BY wins DESC, total DESC
                LIMIT 3""",
             discord_id,
