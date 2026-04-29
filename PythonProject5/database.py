@@ -98,6 +98,16 @@ CREATE TABLE IF NOT EXISTS match_results (
     played_at          TIMESTAMP DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_match_results_game ON match_results(game_id);
+
+CREATE TABLE IF NOT EXISTS teammate_results (
+    game_id      INTEGER NOT NULL,
+    discord_id   BIGINT  NOT NULL REFERENCES players(discord_id),
+    teammate_id  BIGINT  NOT NULL REFERENCES players(discord_id),
+    result       TEXT    NOT NULL,  -- 'win' | 'lose' | 'draw'
+    PRIMARY KEY (game_id, discord_id, teammate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_teammate_discord ON teammate_results(discord_id);
+CREATE INDEX IF NOT EXISTS idx_teammate_teammate ON teammate_results(teammate_id);
 """
 
 
@@ -166,6 +176,21 @@ class Database:
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_match_results_game ON match_results(game_id)"
+            )
+            await conn.execute(
+                """CREATE TABLE IF NOT EXISTS teammate_results (
+                    game_id      INTEGER NOT NULL,
+                    discord_id   BIGINT  NOT NULL REFERENCES players(discord_id),
+                    teammate_id  BIGINT  NOT NULL REFERENCES players(discord_id),
+                    result       TEXT    NOT NULL,
+                    PRIMARY KEY (game_id, discord_id, teammate_id)
+                )"""
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_teammate_discord ON teammate_results(discord_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_teammate_teammate ON teammate_results(teammate_id)"
             )
 
     @property
@@ -584,24 +609,41 @@ class Database:
         )
     async def save_game_results(self, game_id: int, team1: list, team2: list, result: str):
         """
-        Сохраняет парные результаты для каждого игрока относительно каждого оппонента.
+        Сохраняет парные результаты для каждого игрока относительно каждого оппонента,
+        а также данные о тиммейтах (для !stat тандемы/трио).
         result — результат для команды 1: 'win'|'lose'|'draw'
         """
         rows = []
         # team1 против team2
         for p1 in team1:
             for p2 in team2:
-                r1 = result            # результат игрока из team1
+                r1 = result
                 r2 = "lose" if result == "win" else ("win" if result == "lose" else "draw")
                 rows.append((game_id, p1["discord_id"], p2["discord_id"], r1))
                 rows.append((game_id, p2["discord_id"], p1["discord_id"], r2))
         if not rows:
             return
+
+        # Тиммейты: пары внутри одной команды
+        teammate_rows = []
+        r2_result = "lose" if result == "win" else ("win" if result == "lose" else "draw")
+        for team, team_result in ((team1, result), (team2, r2_result)):
+            for i, p1 in enumerate(team):
+                for p2 in team[i + 1:]:
+                    teammate_rows.append((game_id, p1["discord_id"], p2["discord_id"], team_result))
+                    teammate_rows.append((game_id, p2["discord_id"], p1["discord_id"], team_result))
+
         async with self.pool.acquire() as conn:
             await conn.executemany(
                 "INSERT INTO game_results (game_id, discord_id, opponent_id, result) VALUES ($1,$2,$3,$4)",
                 rows,
             )
+            if teammate_rows:
+                await conn.executemany(
+                    """INSERT INTO teammate_results (game_id, discord_id, teammate_id, result)
+                       VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING""",
+                    teammate_rows,
+                )
 
     async def get_elo_history_simple(self, discord_id: int) -> list[_Row]:
         """
@@ -637,6 +679,54 @@ class Database:
                WHERE gr.discord_id = $1
                GROUP BY gr.opponent_id, p.username
                ORDER BY wins DESC, losses DESC""",
+            discord_id,
+        )
+        return _rows(rows)
+
+    async def get_teammate_stats(self, discord_id: int) -> list[_Row]:
+        """
+        Статистика с тиммейтами: сколько игр в одной команде, сколько побед.
+        """
+        rows = await self.pool.fetch(
+            """SELECT
+                tr.teammate_id,
+                p.username,
+                COUNT(*) FILTER (WHERE tr.result = 'win')  AS wins,
+                COUNT(*) FILTER (WHERE tr.result = 'lose') AS losses,
+                COUNT(*) FILTER (WHERE tr.result = 'draw') AS draws,
+                COUNT(*) AS total
+               FROM teammate_results tr
+               JOIN players p ON p.discord_id = tr.teammate_id
+               WHERE tr.discord_id = $1
+               GROUP BY tr.teammate_id, p.username
+               ORDER BY wins DESC, total DESC""",
+            discord_id,
+        )
+        return _rows(rows)
+
+    async def get_trio_stats(self, discord_id: int) -> list[_Row]:
+        """
+        Статистика трио: с какими двумя тиммейтами вместе больше всего побед.
+        """
+        rows = await self.pool.fetch(
+            """SELECT
+                tr1.teammate_id AS teammate1_id,
+                p1.username     AS teammate1_name,
+                tr2.teammate_id AS teammate2_id,
+                p2.username     AS teammate2_name,
+                COUNT(*) FILTER (WHERE tr1.result = 'win') AS wins,
+                COUNT(*) AS total
+               FROM teammate_results tr1
+               JOIN teammate_results tr2
+                 ON tr1.game_id = tr2.game_id
+                AND tr1.discord_id = tr2.discord_id
+                AND tr1.teammate_id < tr2.teammate_id
+               JOIN players p1 ON p1.discord_id = tr1.teammate_id
+               JOIN players p2 ON p2.discord_id = tr2.teammate_id
+               WHERE tr1.discord_id = $1
+               GROUP BY tr1.teammate_id, p1.username, tr2.teammate_id, p2.username
+               ORDER BY wins DESC, total DESC
+               LIMIT 3""",
             discord_id,
         )
         return _rows(rows)
