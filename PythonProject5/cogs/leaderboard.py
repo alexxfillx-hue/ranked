@@ -527,48 +527,40 @@ class Leaderboard(commands.Cog):
         teammate_rows = await self.bot.db.get_teammate_stats(target.id)
         trio_rows = await self.bot.db.get_trio_stats(target.id)
 
-        embed = discord.Embed(title=f"⚔️  Статистика — {player['username']}", color=0xE67E22)
+        embed = discord.Embed(title=f"⚔️  Stats — {player['username']}", color=0xE67E22)
 
-        # Топ побед против оппонентов (только победы)
+        # Top wins against opponents
         top_wins = [r for r in rows if r["wins"] > 0][:5]
         if top_wins:
-            lines = []
-            for r in top_wins:
-                lines.append(f"• **{r['username']}** — {r['wins']} побед")
-            embed.add_field(name="🏆 Больше всего побед против", value="\n".join(lines), inline=False)
+            lines = [f"• **{r['username']}** — {r['wins']} wins" for r in top_wins]
+            embed.add_field(name="🏆 Most wins against", value="\n".join(lines), inline=False)
 
-        # Топ поражений от оппонентов (только поражения)
+        # Top losses against opponents
         top_losses = sorted(rows, key=lambda r: r["losses"], reverse=True)
         top_losses = [r for r in top_losses if r["losses"] > 0][:5]
         if top_losses:
-            lines = []
-            for r in top_losses:
-                lines.append(f"• **{r['username']}** — {r['losses']} поражений")
-            embed.add_field(name="💀 Больше всего поражений от", value="\n".join(lines), inline=False)
+            lines = [f"• **{r['username']}** — {r['losses']} losses" for r in top_losses]
+            embed.add_field(name="💀 Most losses against", value="\n".join(lines), inline=False)
 
-        # Лучший тандем (с кем больше всего побед в одной команде)
+        # Best duo
         best_duo = [r for r in teammate_rows if r["wins"] > 0][:5]
         if best_duo:
-            lines = []
-            for r in best_duo:
-                lines.append(f"• **{r['username']}** — {r['wins']} побед вместе ({r['total']} игр)")
-            embed.add_field(name="🤝 Лучший тандем", value="\n".join(lines), inline=False)
+            lines = [f"• **{r['username']}** — {r['wins']} wins together ({r['total']} games)" for r in best_duo]
+            embed.add_field(name="🤝 Best duo", value="\n".join(lines), inline=False)
 
-        # Лучшее трио
+        # Best trio
         if trio_rows:
-            lines = []
-            for r in trio_rows:
-                lines.append(
-                    f"• **{r['teammate1_name']}** & **{r['teammate2_name']}** "
-                    f"— {r['wins']} побед вместе ({r['total']} игр)"
-                )
-            embed.add_field(name="👑 Лучшее трио", value="\n".join(lines), inline=False)
+            lines = [
+                f"• **{r['teammate1_name']}** & **{r['teammate2_name']}** — {r['wins']} wins together ({r['total']} games)"
+                for r in trio_rows
+            ]
+            embed.add_field(name="👑 Best trio", value="\n".join(lines), inline=False)
 
         if not top_wins and not top_losses and not best_duo:
-            await ctx.send(f"**{player['username']}** пока нет статистики.")
+            await ctx.send(f"**{player['username']}** has no stats yet.")
             return
 
-        embed.set_footer(text=f"Уникальных оппонентов: {len(rows)}")
+        embed.set_footer(text=f"Unique opponents: {len(rows)}")
         await ctx.send(embed=embed)
 
 
