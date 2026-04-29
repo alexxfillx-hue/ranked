@@ -2364,7 +2364,6 @@ class Rooms(commands.Cog):
 
         self._finalize_locks.pop(room_id, None)
         self._pick_message_ids.pop(room_id, None)
-        # NOTE: _last_screenshot_url.pop() is intentionally done AFTER we read the URL below
 
         team1 = [p for p in players if p["team"] == 1]
         team2 = [p for p in players if p["team"] == 2]
@@ -2487,15 +2486,11 @@ class Rooms(commands.Cog):
 
         screenshots = await db.get_screenshots(room_id)
 
-        # Забираем URL скрина ДО очистки словаря (pop делается ниже после использования)
-        first_screenshot_url = self._last_screenshot_url.get(room_id)
+        # FIX 4: забираем URL первого скрина до удаления из БД
+        first_screenshot_url = self._last_screenshot_url.pop(room_id, None)
 
         await db.delete_screenshots(room_id)
         await db.delete_room(room_id)
-
-        # Теперь можно удалить из словаря — URL уже прочитан
-        self._last_screenshot_url.pop(room_id, None)
-
         await self._refresh_lobby()
 
         results_channel = await self._get_or_create_results_channel(guild)
@@ -2515,22 +2510,24 @@ class Rooms(commands.Cog):
             result_channel_id=results_channel.id,
         )
 
-        # Прикрепляем скриншот к результатам матча.
-        # Отправляем URL если есть (был сохранён при получении скрина).
-        # has_screenshots=True означает что скрин был загружен в БД, даже если
-        # он не был принят OCR — в таком случае URL всё равно сохранён в _last_screenshot_url.
-        has_screenshots = bool(screenshots)
-        if first_screenshot_url:
-            # URL Discord-вложения может протухнуть — отправляем как ссылку с пометкой
-            await results_channel.send(
-                f"📸 Скриншоты матча **#{room_id}** · {first_screenshot_url}"
-            )
-        elif has_screenshots:
-            # URL не сохранился в памяти (например после рестарта бота),
-            # но скрин был — сообщаем что он есть, но ссылка недоступна
-            await results_channel.send(
-                f"📸 Скриншоты матча **#{room_id}** · *(ссылка недоступна — скрин был загружен до рестарта бота)*"
-            )
+        # FIX 4: прикрепляем скриншот к результатам матча.
+        # Отправляем если есть скрин в БД — даже если OCR не принял,
+        # но игроки завершили через голосование вручную.
+        if screenshots and first_screenshot_url:
+            try:
+                import aiohttp, io
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(first_screenshot_url) as resp:
+                        if resp.status == 200:
+                            data = await resp.read()
+                            ext = first_screenshot_url.split("?")[0].rsplit(".", 1)[-1] or "png"
+                            file = discord.File(io.BytesIO(data), filename=f"screenshot.{ext}")
+                            await results_channel.send(
+                                f"📸 Скриншоты матча **#{room_id}**",
+                                file=file,
+                            )
+            except Exception:
+                pass
 
         if channel:
             await asyncio.sleep(10)
