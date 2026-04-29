@@ -2510,9 +2510,7 @@ class Rooms(commands.Cog):
             result_channel_id=results_channel.id,
         )
 
-        # FIX 4: прикрепляем скриншот к результатам матча.
-        # Отправляем если есть скрин в БД — даже если OCR не принял,
-        # но игроки завершили через голосование вручную.
+        # FIX 4: прикрепляем скриншот если он не был отправлен раньше (OCR не принял, ручное голосование)
         if screenshots and first_screenshot_url:
             try:
                 import aiohttp, io
@@ -2716,6 +2714,8 @@ class Rooms(commands.Cog):
                     f"📸 **Матч #{room_id}** · {team_label} · {message.author.mention}",
                     files=files,
                 )
+            # Скрин уже отправлен — очищаем URL чтобы _finalize_game не дублировал
+            self._last_screenshot_url.pop(room_id, None)
 
             lock = self._finalize_locks.setdefault(room_id, asyncio.Lock())
             async with lock:
