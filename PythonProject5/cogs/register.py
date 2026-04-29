@@ -352,6 +352,53 @@ class Register(commands.Cog):
         except discord.Forbidden:
             await ctx.send(t("rename_ok_manual", lang, nick=new_nick))
 
+    @commands.command(name="mod_rename")
+    async def mod_rename(self, ctx: commands.Context, member: discord.Member = None, *, new_nick: str = None):
+        """[Мод] Сменить игровое имя любому игроку. Использование: !mod_rename @игрок <новый_ник>"""
+        if not self._guild_check(ctx):
+            return
+
+        if not (ctx.author.guild_permissions.administrator or
+                discord.utils.get(ctx.author.roles, name=Config.MODERATOR_ROLE_NAME)):
+            await ctx.send("❌ Нет прав. Только для модераторов.")
+            return
+
+        if member is None or new_nick is None:
+            await ctx.send("Использование: `!mod_rename @игрок <новый_ник>`  пример: `!mod_rename @alekz NewName`")
+            return
+
+        new_nick = new_nick.strip()
+        if len(new_nick) < 2 or len(new_nick) > 32:
+            await ctx.send("⚠️ Ник должен быть от 2 до 32 символов.")
+            return
+
+        db = self.bot.db
+        player = await db.get_player(member.id)
+        if not player:
+            await ctx.send(f"❌ {member.mention} не зарегистрирован.")
+            return
+
+        taken = await db.get_player_by_username(new_nick)
+        if taken and taken["discord_id"] != member.id:
+            await ctx.send(f"⚠️ Ник **{new_nick}** уже занят другим игроком.")
+            return
+
+        old_nick = player["username"]
+        await db.update_username(member.id, new_nick)
+
+        try:
+            await member.edit(nick=new_nick, reason=f"Смена ника модератором {ctx.author}")
+        except discord.Forbidden:
+            pass
+
+        embed = discord.Embed(title="✏️ Ник изменён модератором", color=0x5865F2)
+        embed.add_field(name="Игрок", value=member.mention, inline=True)
+        embed.add_field(name="Было", value=f"`{old_nick}`", inline=True)
+        embed.add_field(name="Стало", value=f"`{new_nick}`", inline=True)
+        embed.set_footer(text=f"Модератор: {ctx.author.display_name}")
+        embed.timestamp = discord.utils.utcnow()
+        await ctx.send(embed=embed)
+
 
 class _PendingProxy:
     """
