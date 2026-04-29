@@ -38,7 +38,6 @@ COGS = [
     "cogs.rooms",
     "cogs.profile",
     "cogs.leaderboard",
-    "cogs.admin",
 ]
 
 
