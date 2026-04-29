@@ -306,7 +306,7 @@ class LeaveWarningView(discord.ui.View):
                 new_rank, _ = get_rank(new_elo)
                 await reg_cog._sync_rank_role(member, new_elo)
                 if old_rank != new_rank:
-                    await rooms_cog._announce_rank_change(guild, member, new_rank, new_elo)
+                    await rooms_cog._announce_rank_change(guild, member, new_rank, new_elo, old_rank=old_rank)
 
         players = await db.get_room_players(self.room_id)
 
@@ -921,24 +921,39 @@ class Rooms(commands.Cog):
         member: discord.Member,
         new_rank: str,
         new_elo: int,
+        old_rank: str = None,
     ):
-        """Отправляет поздравление со сменой ранга в канал 'chat'."""
+        """Отправляет публичное поздравление со сменой ранга в канал чата."""
         chat_channel = discord.utils.find(
-            lambda c: c.name in ("chat", "💬・чат", "general", "general-chat") or "chat" in c.name.lower(),
+            lambda c: (
+                getattr(Config, "CHAT_CHANNEL_NAME", None) and Config.CHAT_CHANNEL_NAME in c.name
+            ) or c.name in ("chat", "💬・чат", "general", "general-chat") or "chat" in c.name.lower(),
             guild.text_channels,
         )
         if not chat_channel:
             return
+
+        rank_emojis = {
+            "Bronze": "🥉", "Silver": "🥈", "Gold": "🥇",
+            "Platinum": "💎", "Diamond": "💠", "Master": "👑",
+            "Grandmaster": "🔱", "Challenger": "⚡",
+        }
+        emoji = next((v for k, v in rank_emojis.items() if k.lower() in new_rank.lower()), "🏆")
+
+        desc_lines = [f"{member.mention} получает новый ранг!\n"]
+        if old_rank:
+            desc_lines.append(f"**{old_rank}** → {emoji} **{new_rank}**")
+        else:
+            desc_lines.append(f"{emoji} **{new_rank}**")
+        desc_lines.append(f"\n🔢 {new_elo} ELO\n\nПоздравляем! / Congratulations! 🎊")
+
         embed = discord.Embed(
             title="🎉 Новый ранг! / New Rank!",
-            description=(
-                f"{member.mention} получает новый ранг!\n\n"
-                f"🏆 **{new_rank}** · {new_elo} ELO\n\n"
-                f"Поздравляем! / Congratulations! 🎊"
-            ),
+            description="\n".join(desc_lines),
             color=0xFFD700,
         )
         embed.set_thumbnail(url=member.display_avatar.url)
+        embed.timestamp = discord.utils.utcnow()
         await chat_channel.send(embed=embed)
 
     # ── Lobby channel ─────────────────────────────────────────────
@@ -2182,7 +2197,16 @@ class Rooms(commands.Cog):
     # ── win / lose / draw (команды игроков) ──────────────────────
 
     @commands.command(name="win")
-    async def win_cmd(self, ctx: commands.Context):
+    async def win_cmd(self, ctx: commands.Context, team: int = None):
+        """
+        Для модераторов: !win <1 или 2> — принудительно завершить игру без скрина.
+        Для игроков: !win — проголосовать за победу своей команды (требует скрин).
+        """
+        # Модератор с указанием команды — принудительное завершение
+        if self._is_mod(ctx.author) and team in (1, 2):
+            await self._mod_force_win(ctx, team)
+            return
+        # Обычный голос игрока
         await self._vote_end(ctx, "win")
 
     @commands.command(name="lose")
@@ -2192,6 +2216,62 @@ class Rooms(commands.Cog):
     @commands.command(name="draw")
     async def draw(self, ctx: commands.Context):
         await self._vote_end(ctx, "draw")
+
+    async def _mod_force_win(self, ctx: commands.Context, team: int):
+        """Принудительное завершение игры модератором без скрина. Вызывается через !win <1|2>."""
+        if not self._is_guild(ctx):
+            return
+
+        db = self.bot.db
+
+        room = await db.get_room_by_channel(ctx.channel.id)
+        if not room or room["status"] not in ("started", "waiting", "full", "picking"):
+            await ctx.send("❌ В этом канале нет активной комнаты.")
+            return
+
+        room_id = room["room_id"]
+        players = await db.get_room_players(room_id)
+
+        team1 = [p for p in players if p["team"] == 1]
+        team2 = [p for p in players if p["team"] == 2]
+
+        if not team1 or not team2:
+            await ctx.send("❌ Команды ещё не сформированы.")
+            return
+
+        # Если игра ещё не стартовала — запускаем принудительно
+        if room["status"] != "started":
+            await db.update_room_status(room_id, "started")
+
+        v1 = "win" if team == 1 else "lose"
+        v2 = "win" if team == 2 else "lose"
+
+        for p in players:
+            team_vote = v1 if p["team"] == 1 else v2
+            await db.set_end_vote(room_id, p["discord_id"], team_vote)
+
+        # Добавляем фиктивный скриншот если нет ни одного, чтобы финализация прошла
+        screenshots = await db.get_screenshots(room_id)
+        if not screenshots:
+            await db.add_screenshot(room_id, team, ctx.author.id)
+
+        winner_emoji = "🔵" if team == 1 else "🔴"
+        await ctx.send(
+            f"🔨 **[Мод]** {ctx.author.mention} принудительно завершает игру.\n"
+            f"{winner_emoji} **Команда {team}** победила."
+        )
+
+        lock = self._finalize_locks.setdefault(room_id, asyncio.Lock())
+        async with lock:
+            current_room = await db.get_room(room_id)
+            if current_room and current_room["status"] == "started":
+                fresh_players = await db.get_room_players(room_id)
+                cap1 = next((p for p in fresh_players if p["team"] == 1), None)
+                cap2 = next((p for p in fresh_players if p["team"] == 2), None)
+                if cap1 and cap2:
+                    await self._finalize_game(current_room, fresh_players, cap1, cap2, v1, v2)
+
+        await ctx.message.delete(delay=3)
 
     async def _vote_end(self, ctx: commands.Context, vote: str):
         if not self._is_guild(ctx):
@@ -2345,7 +2425,7 @@ class Rooms(commands.Cog):
                     await reg_cog._sync_rank_role(member, new_elo)
                     # FIX 5: объявляем смену ранга в чат
                     if old_rank != new_rank:
-                        await self._announce_rank_change(guild, member, new_rank, new_elo)
+                        await self._announce_rank_change(guild, member, new_rank, new_elo, old_rank=old_rank)
 
         t1_result = "draw" if v1 == "draw" else ("win" if v1 == "win" else "lose")
         await db.save_game_results(room_id, team1, team2, t1_result)
@@ -3034,7 +3114,7 @@ class Rooms(commands.Cog):
                     await reg_cog._sync_rank_role(member, new_elo)
                     # FIX 5: объявляем смену ранга при switch
                     if old_rank != new_rank:
-                        await self._announce_rank_change(guild, member, new_rank, new_elo)
+                        await self._announce_rank_change(guild, member, new_rank, new_elo, old_rank=old_rank)
                 except Exception:
                     pass
 
@@ -3149,7 +3229,7 @@ class Rooms(commands.Cog):
                     await reg_cog._sync_rank_role(member, entry["elo_after"])
                     # FIX 5: объявляем смену ранга при cancel
                     if old_rank != new_rank:
-                        await self._announce_rank_change(guild, member, new_rank, entry["elo_after"])
+                        await self._announce_rank_change(guild, member, new_rank, entry["elo_after"], old_rank=old_rank)
                 except Exception:
                     pass
 
