@@ -563,6 +563,159 @@ class Leaderboard(commands.Cog):
         embed.set_footer(text=f"Unique opponents: {len(rows)}")
         await ctx.send(embed=embed)
 
+    @commands.command(name="menu")
+    async def menu(self, ctx: commands.Context):
+        if not self._is_guild(ctx):
+            return
+        embed = discord.Embed(
+            title="🎮  Player Menu",
+            description="Quick access to all player commands.",
+            color=0x5865F2,
+        )
+        embed.set_footer(text="Buttons work only for you · timeout 5 min")
+        view = PlayerMenuView(ctx.author)
+        await ctx.send(embed=embed, view=view)
+
+
+class PlayerMenuView(discord.ui.View):
+    """Интерактивное меню игрока с кнопками быстрого доступа к командам."""
+
+    def __init__(self, author: discord.Member):
+        super().__init__(timeout=300)
+        self.author = author
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(
+                "❌ This menu belongs to someone else. Type `!menu` to open your own.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        try:
+            await self.message.edit(view=self)
+        except Exception:
+            pass
+
+    # ── Row 0: игровые ────────────────────────────────────────────
+
+    @discord.ui.button(label="Create Room", emoji="🎮", style=discord.ButtonStyle.primary, row=0)
+    async def create_room(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**Create a room:**\n"
+            "`!create 4 team` — 4v4, players pick sides\n"
+            "`!create 4 random` — 4v4, random teams\n"
+            "`!create 4 cap` — 4v4, captain pick\n"
+            "`!create 3 team` — 3v3   `!create 2 team` — 2v2   `!create 1 team` — 1v1\n\n"
+            "Or use the **lobby channel** buttons to join an existing room.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Queue", emoji="🔍", style=discord.ButtonStyle.primary, row=0)
+    async def queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**Join queue:**\n"
+            "`!queue` or `!q` — find any open room\n"
+            "`!q 4 team` — 4v4 team mode\n"
+            "`!q 4 random` — 4v4 random\n"
+            "`!q 4 cap` — 4v4 captain pick\n\n"
+            "You'll be added to the first matching room automatically.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Exit Room", emoji="🚪", style=discord.ButtonStyle.danger, row=0)
+    async def exit_room(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**Leave your current room:**\n"
+            "`!exit` — leave the room you're in\n\n"
+            "⚠️ If the game has already started, leaving costs **-15 ELO**.",
+            ephemeral=True,
+        )
+
+    # ── Row 1: профиль и статистика ───────────────────────────────
+
+    @discord.ui.button(label="Profile", emoji="📋", style=discord.ButtonStyle.secondary, row=1)
+    async def profile(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**View profile:**\n"
+            "`!profile` — your profile\n"
+            "`!profile @player` — another player's profile\n\n"
+            "Shows ELO, rank, wins, losses, winrate.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="ELO Chart", emoji="📈", style=discord.ButtonStyle.secondary, row=1)
+    async def elo_chart(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**ELO history chart:**\n"
+            "`!elo` — all time\n"
+            "`!elo day` — last 24h\n"
+            "`!elo week` — last 7 days\n"
+            "`!elo month` — last 30 days\n"
+            "`!elo week @player` — another player",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Streak", emoji="🔥", style=discord.ButtonStyle.secondary, row=1)
+    async def streak(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**Win/loss streak & recent games:**\n"
+            "`!streak` — your recent match history\n"
+            "`!streak @player` — another player's streak\n\n"
+            "Shows last games and current streak.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Stats", emoji="⚔️", style=discord.ButtonStyle.secondary, row=1)
+    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**Head-to-head & teammate stats:**\n"
+            "`!stat` — your matchup stats\n"
+            "`!stat @player` — another player's stats\n\n"
+            "Shows most wins/losses against opponents, best duo & trio.",
+            ephemeral=True,
+        )
+
+    # ── Row 2: лидерборд и прочее ─────────────────────────────────
+
+    @discord.ui.button(label="Leaderboard", emoji="🏆", style=discord.ButtonStyle.success, row=2)
+    async def leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**Top players by ELO:**\n"
+            "`!top` — full leaderboard with pages",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Ranks", emoji="🎖️", style=discord.ButtonStyle.success, row=2)
+    async def ranks(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**Rank system:**\n"
+            "`!ranks` — see all ranks and required ELO\n"
+            "`!eloinfo` — how ELO is calculated",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Rename", emoji="✏️", style=discord.ButtonStyle.success, row=2)
+    async def rename(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**Change your nickname:**\n"
+            "`!rename <new_nick>` — updates your in-game name and server nickname",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Report", emoji="🚩", style=discord.ButtonStyle.danger, row=2)
+    async def report(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**Report a player:**\n"
+            "`!report @player <reason>` — send a report to moderators\n\n"
+            "Please only report genuine rule violations.",
+            ephemeral=True,
+        )
+
 
 async def setup(bot):
     await bot.add_cog(Leaderboard(bot))
