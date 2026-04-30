@@ -2585,6 +2585,16 @@ class Rooms(commands.Cog):
         except ImportError:
             pass
 
+        # Сообщаем игрокам что бот анализирует скрин
+        analyzing_msg = None
+        if analyze_screenshot is not None:
+            try:
+                analyzing_msg = await message.channel.send(
+                    "🔍 NRT is analyzing the screenshot, please wait..."
+                )
+            except Exception:
+                pass
+
         ocr_result = None
         if analyze_screenshot is not None:
             try:
@@ -2593,6 +2603,13 @@ class Rooms(commands.Cog):
             except Exception as _ocr_err:
                 import logging
                 logging.getLogger("bot").warning("OCR analysis failed: %s", _ocr_err)
+
+        # Удаляем сообщение "analyzing..." после завершения OCR
+        if analyzing_msg is not None:
+            try:
+                await analyzing_msg.delete()
+            except Exception:
+                pass
 
         # FIX 4: сохраняем URL первого скрина ВСЕГДА (для прикрепления при финализации)
         if image_attachments:
@@ -2604,6 +2621,9 @@ class Rooms(commands.Cog):
             size = room["size"]
             team1_nicks = ", ".join(f"**{p['username']}**" for p in players if p["team"] == 1)
             team2_nicks = ", ".join(f"**{p['username']}**" for p in players if p["team"] == 2)
+
+            caps = [p for p in players if p["is_captain"]]
+            cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
 
             await db.add_screenshot(room_id, my_team, message.author.id)
             await message.add_reaction("❓")
@@ -2621,7 +2641,11 @@ class Rooms(commands.Cog):
                 ),
                 color=0xED4245,
             )
-            await message.channel.send(embed=reject_embed, view=VoteEndView(room_id))
+            await message.channel.send(
+                f"{cap_mentions} — скрин не принят, требуется ручное голосование.",
+                embed=reject_embed,
+                view=VoteEndView(room_id),
+            )
             return
 
         # ManualVoteNeeded — OCR нашёл игроков, но не определил победителя
