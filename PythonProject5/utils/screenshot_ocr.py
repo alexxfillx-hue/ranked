@@ -590,7 +590,10 @@ async def analyze_screenshot(
         return None
 
     try:
-        ocr_text = await asyncio.get_event_loop().run_in_executor(None, _run_ocr, image_data)
+        import functools
+        ocr_text = await asyncio.get_event_loop().run_in_executor(
+            None, functools.partial(_run_ocr, image_data, players)
+        )
     except Exception as e:
         log.warning("OCR: ошибка при распознавании: %s", e)
         return None
@@ -653,38 +656,49 @@ async def _download_image(url: str) -> bytes:
 
 def _preprocess_variants(img: "Image.Image") -> "list[np.ndarray]":
     """
-    Возвращает несколько numpy RGB-вариантов изображения для RapidOCR.
+    Возвращает варианты изображения для RapidOCR.
 
-    Варианты:
-      1. Оригинал x2 — базовый.
-      2. Инверт x2 — светлый текст на тёмном фоне (типичный игровой UI).
-      3. Кроп шапки x3 — ПОБЕДА/ПОРАЖЕНИЕ обычно в верхней четверти.
-      4. Инверт шапки — тёмный заголовок.
+    Только два варианта вместо четырёх — для скорости:
+      1. Оригинал x2 — основной, читает тёмный текст на светлом фоне.
+      2. Инверт x2 — читает светлый текст на тёмном фоне (типичный игровой UI).
+
+    Шапку отдельно не вырезаем — RapidOCR сам находит текст в любом месте.
+    Если первый вариант дал вердикт (ПОБЕДА/ПОРАЖЕНИЕ) — второй не запускается.
     """
     from PIL import ImageOps
-    variants: list = []
     w, h = img.size
     rgb = img.convert("RGB")
-
     big = rgb.resize((w * 2, h * 2), Image.LANCZOS)
-    variants.append(np.array(big))
-    variants.append(np.array(ImageOps.invert(big)))
-
-    top_h = max(60, h // 4)
-    top = rgb.crop((0, 0, w, top_h)).resize((w * 3, top_h * 3), Image.LANCZOS)
-    variants.append(np.array(top))
-    variants.append(np.array(ImageOps.invert(top)))
-
-    return variants
+    return [np.array(big), np.array(ImageOps.invert(big))]
 
 
-def _run_ocr(image_data: bytes) -> str:
+def _norm_line(line: str) -> str:
     """
-    Запускает RapidOCR по нескольким вариантам предобработки.
+    Нормализует строку для дедупликации между вариантами OCR.
 
-    RapidOCR возвращает list of [box, text, score] | None.
-    Дедупликация одинаковых строк между вариантами через seen-set.
-    Ранний выход как только найдено ПОБЕДА/ПОРАЖЕНИЕ/VICTORY/DEFEAT.
+    Убираем клановые теги вида [TAG] / {TAG} и все не-словесные символы,
+    чтобы '[0.3s]alekz' и '[D.3s]alekz' оба давали 'alekz' и дедуплицировались.
+    """
+    # Убираем теги в начале строки (повторно до 3 раз)
+    tag_re = re.compile(r"^[\[{(][^\]})]*[\]})]\s*", re.UNICODE)
+    s = line.strip()
+    for _ in range(3):
+        s2 = tag_re.sub("", s)
+        if s2 == s:
+            break
+        s = s2
+    return re.sub(r"[^\wЀ-ӿ]", "", s.lower())
+
+
+def _run_ocr(image_data: bytes, players: "list[dict] | None" = None) -> str:
+    """
+    Запускает RapidOCR по вариантам предобработки.
+
+    Оптимизации:
+    - Только 2 варианта изображения вместо 4 (вдвое быстрее).
+    - Дедупликация по нормализованному виду строки — '[0.3s]alekz' и '[D.3s]alekz'
+      оба дают 'alekz' после нормализации и второй отбрасывается.
+    - Ранний выход после первого варианта если найдены и вердикт и все ники игроков.
     """
     img = Image.open(io.BytesIO(image_data))
     if img.mode not in ("RGB", "RGBA"):
@@ -692,7 +706,16 @@ def _run_ocr(image_data: bytes) -> str:
 
     win_keywords = ("ПОБЕДА", "ПОРАЖЕНИЕ", "VICTORY", "DEFEAT")
     all_lines: list = []
-    seen: set = set()
+    seen_norm: set = set()   # дедупликация по нормализованному содержимому
+
+    # Нормализованные ники игроков для раннего выхода
+    player_norms: set = set()
+    if players:
+        for p in players:
+            if p.get("team") in (1, 2):
+                n = re.sub(r"[^\w]", "", p["username"].lower())
+                if n:
+                    player_norms.add(n)
 
     for variant in _preprocess_variants(img):
         try:
@@ -709,12 +732,22 @@ def _run_ocr(image_data: bytes) -> str:
             if not text or not text.strip():
                 continue
             line = text.strip()
-            if line not in seen:
-                seen.add(line)
+            norm = _norm_line(line)
+            if norm and norm not in seen_norm:
+                seen_norm.add(norm)
                 all_lines.append(line)
 
-        combined = "\n".join(all_lines).upper()
-        if any(kw in combined for kw in win_keywords):
-            break
+        # Ранний выход: вердикт найден И все ники присутствуют в тексте
+        if player_norms:
+            combined_norm = " ".join(seen_norm)
+            combined_upper = "\n".join(all_lines).upper()
+            has_verdict = any(kw in combined_upper for kw in win_keywords)
+            all_found = all(
+                any(pn in cn for cn in seen_norm)
+                for pn in player_norms
+            )
+            if has_verdict and all_found:
+                log.debug("OCR early exit after variant — all players and verdict found")
+                break
 
     return "\n".join(all_lines)
