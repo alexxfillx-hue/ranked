@@ -2525,6 +2525,9 @@ class Rooms(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        import logging as _logging
+        _log = _logging.getLogger("bot.ocr")
+
         if message.author.bot:
             return
         if not message.guild or message.guild.id != Config.GUILD_ID:
@@ -2532,20 +2535,29 @@ class Rooms(commands.Cog):
         if not message.attachments:
             return
 
+        _log.info("on_message: attachment from %s in channel %s", message.author, message.channel.id)
+
         db = self.bot.db
         room = await db.get_player_room(message.author.id)
-        if not room or room["status"] != "started":
+        if not room:
+            _log.info("on_message: player %s has no room — skipping", message.author.id)
+            return
+        if room["status"] != "started":
+            _log.info("on_message: room %s status=%s (not started) — skipping", room["room_id"], room["status"])
             return
 
         if room["channel_id"] != message.channel.id:
+            _log.info("on_message: wrong channel (room ch=%s, msg ch=%s) — skipping", room["channel_id"], message.channel.id)
             return
 
         players = await db.get_room_players(room["room_id"])
         me = next((p for p in players if p["discord_id"] == message.author.id), None)
         if not me:
+            _log.info("on_message: sender not in room players — skipping")
             return
 
         if room["mode"] != "team" and not me["is_captain"]:
+            _log.info("on_message: mode=%s and sender is not captain — skipping", room["mode"])
             return
 
         image_attachments = [
@@ -2553,6 +2565,7 @@ class Rooms(commands.Cog):
             if att.content_type and att.content_type.startswith("image/")
         ]
         if not image_attachments:
+            _log.info("on_message: no image attachments (content_type check failed) — skipping")
             return
 
         room_id = room["room_id"]
