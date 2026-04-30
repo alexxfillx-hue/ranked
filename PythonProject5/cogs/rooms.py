@@ -2648,6 +2648,20 @@ class Rooms(commands.Cog):
             await db.add_screenshot(room_id, my_team, message.author.id)
             await message.add_reaction("❓")
 
+            # Пересылаем скрин в канал результатов сразу, пока файл ещё доступен.
+            # Даже если OCR не принял скрин, игроки могут завершить через голосование —
+            # тогда результат будет уже со скрином в results-канале.
+            screenshots_so_far = await db.get_screenshots(room_id)
+            if len(screenshots_so_far) == 1:
+                results_channel = await self._get_or_create_results_channel(message.guild)
+                team_label = "🔵 Team 1" if my_team == 1 else "🔴 Team 2"
+                files = [await att.to_file() for att in image_attachments]
+                if files:
+                    await results_channel.send(
+                        f"📸 **Match #{room_id}** · {team_label} · {message.author.mention} *(not recognized — manual vote)*",
+                        files=files,
+                    )
+
             reject_embed = discord.Embed(
                 title="⚠️ Screenshot not recognized automatically",
                 description=(
