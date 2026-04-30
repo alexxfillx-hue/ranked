@@ -113,6 +113,19 @@ _OCR_SUBSTITUTIONS: list[tuple[str, str]] = [
     ("ii", "u"),
 ]
 
+# Одиночные символьные замены для нормализации перед сравнением ников.
+# Применяются в _normalize_for_match ПОСЛЕ базовой нормализации.
+# Цель: свести частые OCR-омографы к одной форме.
+#   I (заглавная) → l (строчная)  — «FeeI» должен матчить «Feel»
+#   0 (ноль)      → o (буква)     — «2x0» vs «2xo» в никах
+# Важно: делаем это только в отдельной функции для матчинга ников,
+# а НЕ в базовом _normalize, чтобы не сломать вердикт-паттерны.
+_MATCH_CHAR_MAP: dict[int, int] = {
+    ord("I"): ord("l"),   # заглавная I → строчная l
+    ord("1"): ord("l"),   # цифра 1 → l (часто путают в тонких шрифтах)
+    ord("0"): ord("o"),   # ноль → буква o
+}
+
 
 def _normalize(s: str) -> str:
     """Приводим к нижнему регистру, убираем диакритику и всё кроме букв/цифр/_.
@@ -165,6 +178,20 @@ _PLAYER_LINE_RE = re.compile(
     r"\s+\d",                                              # якорь: пробел + цифра (GS)
     re.UNICODE,
 )
+
+
+def _normalize_for_match(s: str) -> str:
+    """
+    Расширенная нормализация специально для сравнения ников.
+
+    Делает всё что делает _normalize, плюс применяет _MATCH_CHAR_MAP —
+    заменяет одиночные омографы (I→l, 1→l, 0→o) ДО базовой нормализации,
+    пока регистр ещё сохранён (после lowercase «I» уже неотличима от «i»).
+    Используется только в _nick_found_in_ocr, чтобы не затронуть вердикт-паттерны.
+    """
+    # ВАЖНО: маппинг до _normalize, иначе .lower() превратит I в i и замена не сработает
+    s = s.translate(_MATCH_CHAR_MAP)
+    return _normalize(s)
 
 
 def _strip_tag(name: str) -> str:
@@ -296,20 +323,26 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str,
 
     Шаги (от строгого к мягкому):
       1. Точное совпадение с одним из «кандидатов» (токенов строк OCR).
+         Используем _normalize_for_match чтобы I/l/1 и 0/o считались одинаковыми.
       2. Поиск ника как подстроки в каждой нормализованной строке OCR с word-boundary.
          Это решает проблему тегов: "[Bull] Chapella" -> normalize("Chapella") ищется
          в normalize("[Bull] Chapella") = "bullchapella" — не найдёт.
          Но если искать по строкам, то _strip_tag("[Bull] Chapella") = "Chapella"
          и normalize("Chapella") == "chapella" — точное совпадение.
       2б. Ник как отдельное слово в полном нормализованном тексте (фоллбэк).
-      3. Расстояние Левенштейна ≤ 2 только для ников ≥ 5 символов.
+      3. Расстояние Левенштейна ≤ 2 для ников ≥ 4 символов.
+         Порог снижен с 5 до 4 чтобы ловить короткие ники типа «Feel» → «FeeI».
     """
-    nick_norm = _normalize(nick)
+    # Нормализуем ник с расширенными заменами (I→l, 1→l, 0→o)
+    nick_norm = _normalize_for_match(nick)
     if not nick_norm or len(nick_norm) < 2:
         return False
 
+    # Кандидаты тоже нормализуем расширенно для честного сравнения
+    ocr_cands_matched = [_normalize_for_match(c) for c in ocr_candidates]
+
     # 1. Точное совпадение с токеном строки (самый надёжный путь)
-    if nick_norm in ocr_candidates:
+    if nick_norm in ocr_cands_matched:
         return True
 
     # 2. Поиск по строкам: вырезаем тег из каждой строки и сравниваем нормализованный результат.
@@ -317,7 +350,7 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str,
     if ocr_lines:
         for line in ocr_lines:
             stripped = _strip_tag(line.strip())
-            line_norm = _normalize(stripped)
+            line_norm = _normalize_for_match(stripped)
             if line_norm == nick_norm:
                 return True
             # Ник как подстрока строки с word-boundary
@@ -326,15 +359,18 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str,
                 return True
 
     # 2б. Ник как отдельное слово в полном тексте (word-boundary через regex)
+    # Нормализуем полный текст расширенно
+    ocr_full_matched = _normalize_for_match(ocr_full_norm)
     pattern = r"(?<![a-zA-Z0-9_Ѐ-ӿ])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_Ѐ-ӿ])"
-    if re.search(pattern, ocr_full_norm):
+    if re.search(pattern, ocr_full_matched):
         return True
 
-    # 3. Расстояние Левенштейна ≤ 2 — только для длинных ников (≥ 5 символов)
-    #    Порог 2 нужен для OCR-ошибок вида «а» → «sl» (2 символа вместо 1).
-    #    Разница длин ограничена 2 символами чтобы не слить короткие разные ники.
-    if len(nick_norm) >= 5:
-        for cand in ocr_candidates:
+    # 3. Расстояние Левенштейна ≤ 2 — для ников ≥ 4 символов (было ≥ 5).
+    #    Снижено с 5 до 4 чтобы ловить короткие ники: «Feel» (4) → OCR «FeeI» → после
+    #    _normalize_for_match оба дают «feel» (точное совпадение через шаг 1),
+    #    но на случай других коротких искажений оставляем Левенштейна тоже с порогом 4.
+    if len(nick_norm) >= 4:
+        for cand in ocr_cands_matched:
             if abs(len(cand) - len(nick_norm)) <= 2 and _levenshtein(nick_norm, cand) <= 2:
                 return True
 
