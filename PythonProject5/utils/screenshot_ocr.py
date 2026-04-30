@@ -109,15 +109,17 @@ _TAG_RE = re.compile(
 #   "ty Focus 506 37 ..."            -> Focus
 #   "© TEST2 7392 0 ..."             -> TEST2
 #   "Test 7392 0 ..."                -> Test  (иконка не распознана OCR)
+#   "[idc] 2x2 0 0 0 ..."           -> 2x2
 #
 # Иконка необязательна — OCR иногда не читает символ звания вообще.
 # Якорь «пробел + цифра» после ника гарантирует что это строка игрока, а не заголовок.
 _PLAYER_LINE_RE = re.compile(
     r"^"
-    r"(?:(?:[^\w\u0400-\u04FF\[{(]|\b\w{1,3}\b)*\s+)?"  # иконка-мусор (необязательна)
-    r"(?:[\[{(][^\]})]*[\]})]\s*)?"                       # необязательный [TAG]
-    r"(\S+)"                                               # НИК (захватываем)
-    r"\s+\d",                                              # якорь: пробел + цифра (GS)
+    r"(?:[^\w\u0400-\u04FF\[{(]*\s*)?"              # иконка-мусор из спецсимволов (необязательна)
+    r"(?:[\[{(][^\]})]{1,20}[\]})]\s*)?"             # необязательный [TAG] — до 20 символов
+    r"(?:[\[{(][^\]})]{1,20}[\]})]\s*)?"             # второй необязательный [TAG]
+    r"(\S+)"                                          # НИК (захватываем)
+    r"\s+\d",                                         # якорь: пробел + цифра (GS)
     re.UNICODE,
 )
 
@@ -218,6 +220,12 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str)
             # Разница длин не более 1 символа — иначе это разные слова
             if abs(len(cand) - len(nick_norm)) <= 1 and _levenshtein(nick_norm, cand) <= 1:
                 return True
+
+    # 4. Для коротких ников содержащих цифры (напр. "2x2", "d4d") —
+    #    word-boundary ненадёжен, ищем точное вхождение в полном тексте
+    if len(nick_norm) >= 2 and any(c.isdigit() for c in nick_norm):
+        if nick_norm in ocr_full_norm:
+            return True
 
     return False
 
@@ -428,17 +436,15 @@ def _find_team_first_position(team_players: list[dict], ocr_text: str) -> int:
 
 def _determine_winner_team(verdict: str, players: list[dict], matched: list[str], ocr_text: str = "") -> tuple[int, str]:
     """
-    Определяет победившую команду по позициям ников в OCR-тексте.
-
-    На скрине этой игры победители ВСЕГДА в верхней части таблицы (синий фон),
-    проигравшие — в нижней (тёмно-красный). Слово ПОБЕДА стоит вверху по центру.
+    Определяет победившую команду исходя из вердикта и РЕАЛЬНОГО расположения команд на скрине.
 
     Алгоритм:
-      1. Находим позицию ПОБЕДА/VICTORY в OCR-тексте.
-      2. Для каждой команды берём МЕДИАННУЮ позицию ников (устойчиво к выбросам).
-      3. Та команда чья медианная позиция МЕНЬШЕ (выше на экране) — победитель,
-         если её ники идут ДО или СРАЗУ ПОСЛЕ слова ПОБЕДА.
-      4. Fallback: просто та команда чьи ники раньше в тексте.
+      1. Находим позицию первого ника каждой команды в OCR-тексте.
+      2. Та команда, чьи ники встречаются раньше — «верхняя» на скрине.
+      3. win_top  → верхняя команда победила (ПОБЕДА/VICTORY стоит раньше).
+      4. win_bottom → верхняя команда проиграла.
+
+    Если позиции определить невозможно (нет OCR-текста) — используем team1 как «верхнюю».
     """
     matched_set = set(matched)
     t1_found = [p for p in players if p["team"] == 1 and p["username"] in matched_set]
@@ -446,82 +452,39 @@ def _determine_winner_team(verdict: str, players: list[dict], matched: list[str]
 
     confidence = "high"
 
-    if not ocr_text or not t1_found or not t2_found:
-        log.warning(
-            "OCR: не удалось определить позиции команд "
-            "(t1_found=%d t2_found=%d) — team1 = победитель при win_top",
-            len(t1_found), len(t2_found),
+    # Определяем какая команда реально стоит выше на скрине
+    top_team = 1  # дефолт если не можем определить
+    if ocr_text and t1_found and t2_found:
+        pos1 = _find_team_first_position(t1_found, ocr_text)
+        pos2 = _find_team_first_position(t2_found, ocr_text)
+        log.debug(
+            "OCR team positions: team1_first=%d team2_first=%d → top_team=%d",
+            pos1, pos2, 1 if pos1 <= pos2 else 2,
         )
-        winner_team = 1 if verdict == "win_top" else 2
-        return winner_team, confidence
-
-    ocr_norm = _normalize(ocr_text)
-    ocr_upper = ocr_text.upper()
-
-    def team_positions(team_list: list[dict]) -> list[int]:
-        positions = []
-        for p in team_list:
-            nick_norm = _normalize(p["username"])
-            if not nick_norm:
-                continue
-            pattern = r"(?<![a-zA-Z0-9_\u0400-\u04FF])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_\u0400-\u04FF])"
-            m = re.search(pattern, ocr_norm)
-            if m:
-                positions.append(m.start())
-        return positions
-
-    pos1_list = team_positions(t1_found)
-    pos2_list = team_positions(t2_found)
-
-    if not pos1_list or not pos2_list:
-        winner_team = 1 if verdict == "win_top" else 2
-        log.warning("OCR: позиции не найдены, fallback verdict=%s → winner=%d", verdict, winner_team)
-        return winner_team, confidence
-
-    # Медианная позиция — устойчива к выбросам OCR
-    def median(lst):
-        s = sorted(lst)
-        n = len(s)
-        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) // 2
-
-    med1 = median(pos1_list)
-    med2 = median(pos2_list)
-
-    # Позиция слова ПОБЕДА
-    win_kws = [r"ПОБЕДА", r"П0БЕДА", r"VICTORY"]
-    победа_pos = min(
-        (m.start() for kw in win_kws for m in re.finditer(kw, ocr_upper)),
-        default=None,
-    )
-
-    log.debug(
-        "OCR positions: победа=%s team1_median=%d team2_median=%d",
-        победа_pos, med1, med2,
-    )
-
-    if победа_pos is not None:
-        # Победители — та команда чья медиана БЛИЖЕ к позиции ПОБЕДА и стоит ДО неё
-        # (их строки в таблице идут в верхней части скрина, до или сразу после заголовка)
-        dist1_before = (победа_pos - med1) if med1 <= победа_pos else -1
-        dist2_before = (победа_pos - med2) if med2 <= победа_pos else -1
-
-        if dist1_before >= 0 and dist2_before < 0:
-            winner_team = 1
-        elif dist2_before >= 0 and dist1_before < 0:
-            winner_team = 2
-        elif dist1_before >= 0 and dist2_before >= 0:
-            # Обе команды до ПОБЕДА — ближайшая к ней победила
-            winner_team = 1 if dist1_before <= dist2_before else 2
+        if pos1 <= pos2:
+            top_team = 1  # Команда 1 стоит выше на скрине
         else:
-            # Обе после ПОБЕДА — та что раньше в тексте
-            winner_team = 1 if med1 <= med2 else 2
+            top_team = 2  # Команда 2 стоит выше на скрине
     else:
-        # ПОБЕДА не найдена — та команда что раньше в тексте (верхняя = победитель)
-        winner_team = 1 if med1 <= med2 else 2
+        log.warning(
+            "OCR: не удалось определить позиции команд на скрине "
+            "(t1_found=%d t2_found=%d ocr_len=%d) — используем team1 как верхнюю",
+            len(t1_found), len(t2_found), len(ocr_text),
+        )
+
+    bottom_team = 2 if top_team == 1 else 1
+
+    # win_top: ПОБЕДА/VICTORY встретилась РАНЬШЕ чем ПОРАЖЕНИЕ/DEFEAT
+    # → верхняя команда победила
+    if verdict == "win_top":
+        winner_team = top_team
+    else:
+        # win_bottom: ПОРАЖЕНИЕ встретилось раньше → верхняя проиграла
+        winner_team = bottom_team
 
     log.info(
-        "OCR winner: verdict=%s победа_pos=%s med1=%d med2=%d → winner_team=%d",
-        verdict, победа_pos, med1, med2, winner_team,
+        "OCR winner determination: verdict=%s top_team=%d bottom_team=%d → winner_team=%d",
+        verdict, top_team, bottom_team, winner_team,
     )
     return winner_team, confidence
 
