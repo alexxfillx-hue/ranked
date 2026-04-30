@@ -272,8 +272,11 @@ def _extract_ocr_names(ocr_text: str) -> list[str]:
                 continue
             next_line = lines[i + 1] if i + 1 < len(lines) else ""
             prev_line = lines[i - 1] if i > 0 else ""
-            next_is_number = bool(re.match(r"^\d+(\.\d+)?$", next_line))
-            prev_is_number = bool(re.match(r"^\d+(\.\d+)?$", prev_line))
+            # GS может быть с пробелом как разделителем тысяч: "9 499" -> нормализуем
+            next_line_norm = next_line.replace(" ", "").replace("\u00a0", "")
+            prev_line_norm = prev_line.replace(" ", "").replace("\u00a0", "")
+            next_is_number = bool(re.match(r"^\d+(\.\d+)?$", next_line_norm))
+            prev_is_number = bool(re.match(r"^\d+(\.\d+)?$", prev_line_norm))
             # Якорь «следующая строка — число» (GS после ника) — основной критерий.
             # Якорь «предыдущая строка — число» нужен для последнего игрока в таблице,
             # у которого после ника нет строки (или идёт пустая строка).
@@ -287,16 +290,19 @@ def _extract_ocr_names(ocr_text: str) -> list[str]:
     return list(candidates)
 
 
-def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str) -> bool:
+def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str, ocr_lines: list[str] | None = None) -> bool:
     """
     Проверяет, найден ли ник игрока Discord в OCR-тексте.
 
     Шаги (от строгого к мягкому):
       1. Точное совпадение с одним из «кандидатов» (токенов строк OCR).
-         Это защищает от того что "test" найдётся внутри "test2".
-      2. Вхождение ника как отдельного слова (word-boundary) в полный нормализованный текст.
-      3. Расстояние Левенштейна ≤ 1 (опечатка OCR в 1 символ) только для ников ≥ 5 символов
-         и только если кандидат той же длины ± 1 (не допускаем совпадения коротких ников).
+      2. Поиск ника как подстроки в каждой нормализованной строке OCR с word-boundary.
+         Это решает проблему тегов: "[Bull] Chapella" -> normalize("Chapella") ищется
+         в normalize("[Bull] Chapella") = "bullchapella" — не найдёт.
+         Но если искать по строкам, то _strip_tag("[Bull] Chapella") = "Chapella"
+         и normalize("Chapella") == "chapella" — точное совпадение.
+      2б. Ник как отдельное слово в полном нормализованном тексте (фоллбэк).
+      3. Расстояние Левенштейна ≤ 2 только для ников ≥ 5 символов.
     """
     nick_norm = _normalize(nick)
     if not nick_norm or len(nick_norm) < 2:
@@ -306,10 +312,21 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str)
     if nick_norm in ocr_candidates:
         return True
 
-    # 2. Ник как отдельное слово в полном тексте (word-boundary через regex)
-    #    Используем \b-подобный подход: ник должен быть окружён не-словесными символами
-    #    или началом/концом строки.
-    pattern = r"(?<![a-zA-Z0-9_\u0400-\u04FF])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_\u0400-\u04FF])"
+    # 2. Поиск по строкам: вырезаем тег из каждой строки и сравниваем нормализованный результат.
+    #    Это решает случай "[Bull] Chapella" где _normalize сливает тег с ником в одно слово.
+    if ocr_lines:
+        for line in ocr_lines:
+            stripped = _strip_tag(line.strip())
+            line_norm = _normalize(stripped)
+            if line_norm == nick_norm:
+                return True
+            # Ник как подстрока строки с word-boundary
+            pattern_line = r"(?<![a-zA-Z0-9_Ѐ-ӿ])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_Ѐ-ӿ])"
+            if re.search(pattern_line, line_norm):
+                return True
+
+    # 2б. Ник как отдельное слово в полном тексте (word-boundary через regex)
+    pattern = r"(?<![a-zA-Z0-9_Ѐ-ӿ])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_Ѐ-ӿ])"
     if re.search(pattern, ocr_full_norm):
         return True
 
@@ -331,13 +348,14 @@ def _match_players(ocr_text: str, players: list[dict]) -> list[str]:
     """
     ocr_candidates = _extract_ocr_names(ocr_text)
     # Фильтруем системные строки перед нормализацией полного текста
-    ocr_text_clean = "\n".join(ln for ln in ocr_text.splitlines() if not _UID_LINE_RE.search(ln))
+    ocr_lines_clean = [ln for ln in ocr_text.splitlines() if not _UID_LINE_RE.search(ln)]
+    ocr_text_clean = "\n".join(ocr_lines_clean)
     ocr_full_norm  = _normalize(ocr_text_clean)
 
     matched = []
     for p in players:
         nick = p["username"]
-        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm):
+        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm, ocr_lines=ocr_lines_clean):
             matched.append(nick)
 
     return matched
@@ -391,12 +409,13 @@ def _count_nicks_on_screenshot(ocr_text: str, all_known_players: list[dict]) -> 
     Если ни одного совпадения — возвращает 0 (проверку количества пропускаем).
     """
     ocr_candidates = _extract_ocr_names(ocr_text)
+    ocr_lines = ocr_text.splitlines()
     ocr_full_norm = _normalize(ocr_text)
 
     found_nicks = set()
     for p in all_known_players:
         nick = p["username"]
-        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm):
+        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm, ocr_lines=ocr_lines):
             found_nicks.add(nick)
 
     return len(found_nicks)
