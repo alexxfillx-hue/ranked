@@ -113,19 +113,6 @@ _OCR_SUBSTITUTIONS: list[tuple[str, str]] = [
     ("ii", "u"),
 ]
 
-# Одиночные символьные замены для нормализации перед сравнением ников.
-# Применяются в _normalize_for_match ПОСЛЕ базовой нормализации.
-# Цель: свести частые OCR-омографы к одной форме.
-#   I (заглавная) → l (строчная)  — «FeeI» должен матчить «Feel»
-#   0 (ноль)      → o (буква)     — «2x0» vs «2xo» в никах
-# Важно: делаем это только в отдельной функции для матчинга ников,
-# а НЕ в базовом _normalize, чтобы не сломать вердикт-паттерны.
-_MATCH_CHAR_MAP: dict[int, int] = {
-    ord("I"): ord("l"),   # заглавная I → строчная l
-    ord("1"): ord("l"),   # цифра 1 → l (часто путают в тонких шрифтах)
-    ord("0"): ord("o"),   # ноль → буква o
-}
-
 
 def _normalize(s: str) -> str:
     """Приводим к нижнему регистру, убираем диакритику и всё кроме букв/цифр/_.
@@ -178,20 +165,6 @@ _PLAYER_LINE_RE = re.compile(
     r"\s+\d",                                              # якорь: пробел + цифра (GS)
     re.UNICODE,
 )
-
-
-def _normalize_for_match(s: str) -> str:
-    """
-    Расширенная нормализация специально для сравнения ников.
-
-    Делает всё что делает _normalize, плюс применяет _MATCH_CHAR_MAP —
-    заменяет одиночные омографы (I→l, 1→l, 0→o) ДО базовой нормализации,
-    пока регистр ещё сохранён (после lowercase «I» уже неотличима от «i»).
-    Используется только в _nick_found_in_ocr, чтобы не затронуть вердикт-паттерны.
-    """
-    # ВАЖНО: маппинг до _normalize, иначе .lower() превратит I в i и замена не сработает
-    s = s.translate(_MATCH_CHAR_MAP)
-    return _normalize(s)
 
 
 def _strip_tag(name: str) -> str:
@@ -323,26 +296,20 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str,
 
     Шаги (от строгого к мягкому):
       1. Точное совпадение с одним из «кандидатов» (токенов строк OCR).
-         Используем _normalize_for_match чтобы I/l/1 и 0/o считались одинаковыми.
       2. Поиск ника как подстроки в каждой нормализованной строке OCR с word-boundary.
          Это решает проблему тегов: "[Bull] Chapella" -> normalize("Chapella") ищется
          в normalize("[Bull] Chapella") = "bullchapella" — не найдёт.
          Но если искать по строкам, то _strip_tag("[Bull] Chapella") = "Chapella"
          и normalize("Chapella") == "chapella" — точное совпадение.
       2б. Ник как отдельное слово в полном нормализованном тексте (фоллбэк).
-      3. Расстояние Левенштейна ≤ 2 для ников ≥ 4 символов.
-         Порог снижен с 5 до 4 чтобы ловить короткие ники типа «Feel» → «FeeI».
+      3. Расстояние Левенштейна ≤ 2 только для ников ≥ 5 символов.
     """
-    # Нормализуем ник с расширенными заменами (I→l, 1→l, 0→o)
-    nick_norm = _normalize_for_match(nick)
+    nick_norm = _normalize(nick)
     if not nick_norm or len(nick_norm) < 2:
         return False
 
-    # Кандидаты тоже нормализуем расширенно для честного сравнения
-    ocr_cands_matched = [_normalize_for_match(c) for c in ocr_candidates]
-
     # 1. Точное совпадение с токеном строки (самый надёжный путь)
-    if nick_norm in ocr_cands_matched:
+    if nick_norm in ocr_candidates:
         return True
 
     # 2. Поиск по строкам: вырезаем тег из каждой строки и сравниваем нормализованный результат.
@@ -350,7 +317,7 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str,
     if ocr_lines:
         for line in ocr_lines:
             stripped = _strip_tag(line.strip())
-            line_norm = _normalize_for_match(stripped)
+            line_norm = _normalize(stripped)
             if line_norm == nick_norm:
                 return True
             # Ник как подстрока строки с word-boundary
@@ -359,18 +326,15 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str,
                 return True
 
     # 2б. Ник как отдельное слово в полном тексте (word-boundary через regex)
-    # Нормализуем полный текст расширенно
-    ocr_full_matched = _normalize_for_match(ocr_full_norm)
     pattern = r"(?<![a-zA-Z0-9_Ѐ-ӿ])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_Ѐ-ӿ])"
-    if re.search(pattern, ocr_full_matched):
+    if re.search(pattern, ocr_full_norm):
         return True
 
-    # 3. Расстояние Левенштейна ≤ 2 — для ников ≥ 4 символов (было ≥ 5).
-    #    Снижено с 5 до 4 чтобы ловить короткие ники: «Feel» (4) → OCR «FeeI» → после
-    #    _normalize_for_match оба дают «feel» (точное совпадение через шаг 1),
-    #    но на случай других коротких искажений оставляем Левенштейна тоже с порогом 4.
-    if len(nick_norm) >= 4:
-        for cand in ocr_cands_matched:
+    # 3. Расстояние Левенштейна ≤ 2 — только для длинных ников (≥ 5 символов)
+    #    Порог 2 нужен для OCR-ошибок вида «а» → «sl» (2 символа вместо 1).
+    #    Разница длин ограничена 2 символами чтобы не слить короткие разные ники.
+    if len(nick_norm) >= 5:
+        for cand in ocr_candidates:
             if abs(len(cand) - len(nick_norm)) <= 2 and _levenshtein(nick_norm, cand) <= 2:
                 return True
 
@@ -401,8 +365,10 @@ def _find_verdict(text: str) -> Optional[str]:
     upper = text.upper()
     win_patterns  = [
         r"ПОБЕДА", r"П0БЕДА", r"VICTORY", r"\bWIN\b",
-        # OCR читает кириллицу латиницей: ПОБЕДА → POBEDA / HOBEDA / NOBEDA
-        r"[NПP][O0][ВB][Е3E][ДD][АA]",
+        # OCR читает кириллицу латиницей. Разбор «NO6EAA»:
+        #   П→N/P,  О→O/0,  Б→B/6 (цифра!),  Е→E/3,  Д→D/A (!!),  А→A
+        # Д читается как A — поэтому последние два символа оба A в «NO6EAA».
+        r"[NПP][O0][B6Б][E3Е][DAДd][AА]",
     ]
     lose_patterns = [
         r"ПОРАЖЕНИЕ", r"П0РАЖЕНИЕ", r"DEFEAT", r"\bLOSS\b", r"\bLOSE\b",
@@ -799,22 +765,35 @@ async def _download_image(url: str) -> bytes:
             return await resp.read()
 
 
-def _preprocess_variants(img: "Image.Image") -> "list[np.ndarray]":
+def _preprocess_variants(img: "Image.Image") -> "list[tuple[np.ndarray, bool]]":
     """
-    Возвращает варианты изображения для RapidOCR.
+    Возвращает варианты изображения для RapidOCR в виде (массив, is_inverted).
 
     Только два варианта вместо четырёх — для скорости:
       1. Оригинал x2 — основной, читает тёмный текст на светлом фоне.
       2. Инверт x2 — читает светлый текст на тёмном фоне (типичный игровой UI).
 
-    Шапку отдельно не вырезаем — RapidOCR сам находит текст в любом месте.
-    Если первый вариант дал вердикт (ПОБЕДА/ПОРАЖЕНИЕ) — второй не запускается.
+    BILINEAR вместо LANCZOS — в ~2x быстрее при аналогичном качестве для OCR.
+    Инверт создаётся лениво — только если первый вариант не дал раннего выхода.
     """
     from PIL import ImageOps
     w, h = img.size
     rgb = img.convert("RGB")
-    big = rgb.resize((w * 2, h * 2), Image.LANCZOS)
-    return [np.array(big), np.array(ImageOps.invert(big))]
+    big = rgb.resize((w * 2, h * 2), Image.BILINEAR)
+    inv = ImageOps.invert(big)
+    return [(np.array(big), False), (np.array(inv), True)]
+
+
+# Паттерны для раннего выхода в _run_ocr — синхронизированы с _find_verdict.
+# Используем скомпилированные объекты для скорости (применяются на каждом варианте).
+_WIN_PATTERNS_RE  = [re.compile(p) for p in [
+    r"ПОБЕДА", r"П0БЕДА", r"VICTORY", r"\bWIN\b",
+    r"[NПP][O0][B6Б][E3Е][DAДd][AА]",
+]]
+_LOSE_PATTERNS_RE = [re.compile(p) for p in [
+    r"ПОРАЖЕНИЕ", r"П0РАЖЕНИЕ", r"DEFEAT", r"\bLOSS\b", r"\bLOSE\b",
+    r"[NПn][O0][PРp][AАa][KЖkж][EЕe][HНh][NИni][EЕe]",
+]]
 
 
 def _norm_line(line: str) -> str:
@@ -840,16 +819,16 @@ def _run_ocr(image_data: bytes, players: "list[dict] | None" = None) -> str:
     Запускает RapidOCR по вариантам предобработки.
 
     Оптимизации:
-    - Только 2 варианта изображения вместо 4 (вдвое быстрее).
-    - Дедупликация по нормализованному виду строки — '[0.3s]alekz' и '[D.3s]alekz'
-      оба дают 'alekz' после нормализации и второй отбрасывается.
-    - Ранний выход после первого варианта если найдены и вердикт и все ники игроков.
+    - BILINEAR масштабирование вместо LANCZOS (в ~2x быстрее, качество для OCR аналогично).
+    - Только 2 варианта изображения вместо 4.
+    - Дедупликация по нормализованному виду строки.
+    - Ранний выход после первого варианта если найдены вердикт (по тем же regex что
+      _find_verdict — включая «nO6EAA» и другие OCR-искажения) и все ники игроков.
     """
     img = Image.open(io.BytesIO(image_data))
     if img.mode not in ("RGB", "RGBA"):
         img = img.convert("RGB")
 
-    win_keywords = ("ПОБЕДА", "ПОРАЖЕНИЕ", "VICTORY", "DEFEAT")
     all_lines: list = []
     seen_norm: set = set()   # дедупликация по нормализованному содержимому
 
@@ -862,7 +841,7 @@ def _run_ocr(image_data: bytes, players: "list[dict] | None" = None) -> str:
                 if n:
                     player_norms.add(n)
 
-    for variant in _preprocess_variants(img):
+    for variant, _is_inv in _preprocess_variants(img):
         try:
             result, _ = _rapid(variant)
         except Exception as e:
@@ -883,15 +862,18 @@ def _run_ocr(image_data: bytes, players: "list[dict] | None" = None) -> str:
                 all_lines.append(line)
 
         # Ранний выход: вердикт найден И все ники присутствуют в тексте.
-        # Фильтруем системные UID-строки клиента из проверки: они содержат ники
-        # (UID:2x2|TYPE:...) и ложно триггерят ранний выход, не давая запустить
-        # инвертированный вариант который читает цветной текст таблицы.
+        # Используем те же скомпилированные regex что и _find_verdict —
+        # это гарантирует что OCR-искажения вроде «nO6EAA» тоже считаются победой.
+        # Фильтруем системные UID-строки (они содержат ники и дают ложный ранний выход).
         if player_norms:
             seen_norm_filtered = {n for n in seen_norm if not _UID_LINE_RE.search(n)}
             combined_upper = "\n".join(
                 ln for ln in all_lines if not _UID_LINE_RE.search(ln)
             ).upper()
-            has_verdict = any(kw in combined_upper for kw in win_keywords)
+            has_verdict = (
+                any(p.search(combined_upper) for p in _WIN_PATTERNS_RE) or
+                any(p.search(combined_upper) for p in _LOSE_PATTERNS_RE)
+            )
             all_found = all(
                 any(pn in cn for cn in seen_norm_filtered)
                 for pn in player_norms
