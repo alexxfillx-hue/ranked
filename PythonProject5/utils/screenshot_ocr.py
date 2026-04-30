@@ -118,11 +118,11 @@ def _normalize(s: str) -> str:
     """Приводим к нижнему регистру, убираем диакритику и всё кроме букв/цифр/_.
 
     Шаги:
-      1. Гомоглифная замена: кирилл. х/о/с/е/… → лат. x/o/c/e/…
+      1. Гомоглифная замена: кирилл. х/о/с/е/... -> лат. x/o/c/e/...
          Это решает проблему «2х2» (кирилл.) vs «2x2» (лат.) в никах.
       2. NFKD-нормализация + lowercase.
-      3. OCR-подмены для типичных ошибок Tesseract (sl→a, rn→m и т.д.).
-      4. Удаляем всё кроме \w.
+      3. OCR-подмены для типичных ошибок Tesseract (sl->a, rn->m и т.д.).
+      4. Удаляем всё кроме \\w.
     """
     s = s.translate(_CYRILLIC_TO_LATIN)
     s = unicodedata.normalize("NFKD", s.lower())
@@ -213,9 +213,13 @@ _SERVICE_WORDS = {
 # Захватываем: необязательный тег + токен без пробелов.
 _CELL_LINE_RE = re.compile(
     r"^"
-    r"(?:[\[{(][^\]})]*[\]})]\s*)?"  # необязательный [TAG]
-    r"([^\s\[\]{}\(\)]+)"            # токен-ник
-    r"\s*$",                          # до конца строки (никаких цифр!)
+    # Необязательный «мусор» в начале: символы вне ASCII-печатного диапазона
+    # (Unicode-иконки, знаки рейтинга вроде 女/★/☆) и короткие ASCII-мусор-слова.
+    # Используем ленивый подход: всё до первого [ или до начала ника.
+    r"(?:[^\x00-\x7F\[{(]|\b\w{1,3}\b)*\s*"  # Unicode-иконки / короткие ASCII-токены
+    r"(?:[\[{(][^\]})]*[\]})]\s*)?"           # необязательный [TAG]
+    r"([^\s\[\]{}\(\)]+)"                     # токен-ник
+    r"\s*$",                                   # до конца строки (никаких цифр!)
     re.UNICODE,
 )
 
@@ -262,8 +266,11 @@ def _extract_ocr_names(ocr_text: str) -> list[str]:
                 continue
             next_line = lines[i + 1] if i + 1 < len(lines) else ""
             next_is_number = bool(re.match(r"^\d+(\.\d+)?$", next_line))
+            # Принимаем и последнюю строку (нет следующей) — иначе последний игрок в таблице
+            # всегда терял бы якорь. Пустая next_line тоже считается допустимой.
+            next_ok = next_is_number or next_line == ""
             tok_norm = _normalize(tok_raw)
-            if next_is_number and len(tok_norm) >= 2 and tok_norm not in _SERVICE_WORDS:
+            if next_ok and len(tok_norm) >= 2 and tok_norm not in _SERVICE_WORDS:
                 candidates.add(tok_norm)
 
     return list(candidates)
