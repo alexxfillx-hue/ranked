@@ -892,6 +892,23 @@ class Database:
 
                 new_results = {pid: invert(r) for pid, r in old_results.items()}
 
+                # Строим карту: discord_id → старый change из elo_history
+                hist_by_pid = {h["discord_id"]: h for h in hist_rows}
+
+                # Считаем правильный new_change:
+                # Игрок менял результат win→lose или lose→win.
+                # Правильное значение change для новой роли = среднее change
+                # противоположной команды (с правильным знаком).
+                # Например: старые победители получили +8, старые проигравшие -4.
+                # После switch: старые победители должны получить -4, старые проигравшие +8.
+
+                # Считаем средний |change| для каждого старого результата
+                win_changes = [abs(hist_by_pid[pid]["change"]) for pid in hist_by_pid if old_results.get(pid) == "win"]
+                lose_changes = [abs(hist_by_pid[pid]["change"]) for pid in hist_by_pid if old_results.get(pid) == "lose"]
+
+                avg_win_change = round(sum(win_changes) / len(win_changes)) if win_changes else 1
+                avg_lose_change = round(sum(lose_changes) / len(lose_changes)) if lose_changes else 1
+
                 # Для каждого игрока: откат → применение нового ELO
                 elo_changes = {}
                 for h in hist_rows:
@@ -902,11 +919,18 @@ class Database:
                         continue
 
                     elo_before_orig = h["elo_before"]   # ELO до старого матча
-                    old_change = h["change"]             # старое изменение
 
-                    # Новый change = -old_change (зеркально)
-                    new_change = -old_change
-                    # Ограничения: победа >= +1, поражение <= -1
+                    # Новый change берём из противоположной группы:
+                    # бывший winner теперь loser → получает то что losers теряли
+                    # бывший loser теперь winner → получает то что winners получали
+                    if new_result == "win":
+                        new_change = avg_win_change   # бывшие победители получили X → теперь столько же получат бывшие losers
+                    elif new_result == "lose":
+                        new_change = -avg_lose_change  # бывшие losers теряли Y → теперь столько же потеряют бывшие winners
+                    else:
+                        new_change = 0
+
+                    # Жёсткие ограничения
                     if new_result == "win" and new_change < 1:
                         new_change = 1
                     elif new_result == "lose" and new_change > -1:
