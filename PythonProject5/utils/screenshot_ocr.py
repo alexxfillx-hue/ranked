@@ -81,8 +81,25 @@ class ManualVoteNeeded:
 # ── Вспомогательные функции ─────────────────────────────────────────────────────
 
 def _normalize(s: str) -> str:
-    """Приводим к нижнему регистру, убираем диакритику и всё кроме букв/цифр/_."""
+    """Приводим к нижнему регистру, убираем диакритику и всё кроме букв/цифр/_.
+
+    Дополнительно: заменяем типичные OCR-ошибки «латиница вместо кириллицы» и наоборот,
+    чтобы 'slekz' совпадал с 'alekz' (OCR читает кирилл. «а» как «sl» / «s1»).
+    """
+    # Типовые OCR-подмены: многосимвольные → сначала (порядок важен)
+    _OCR_SUBSTITUTIONS = [
+        # Частые ошибки Tesseract при смешанном rus+eng тексте
+        ("sl", "a"),   # кирилл. «а» → «sl» или «s1»
+        ("s1", "a"),
+        ("cl", "a"),
+        ("rn", "m"),
+        ("vv", "w"),
+        ("li", "h"),
+        ("ii", "u"),
+    ]
     s = unicodedata.normalize("NFKD", s.lower())
+    for wrong, right in _OCR_SUBSTITUTIONS:
+        s = s.replace(wrong, right)
     return re.sub(r"[^\w]", "", s, flags=re.UNICODE)
 
 
@@ -211,12 +228,12 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str)
     if re.search(pattern, ocr_full_norm):
         return True
 
-    # 3. Расстояние Левенштейна ≤ 1 — только для длинных ников (≥ 5 символов)
-    #    и только если кандидат похожей длины, чтобы "test" не совпал с "test2"
+    # 3. Расстояние Левенштейна ≤ 2 — только для длинных ников (≥ 5 символов)
+    #    Порог 2 нужен для OCR-ошибок вида «а» → «sl» (2 символа вместо 1).
+    #    Разница длин ограничена 2 символами чтобы не слить короткие разные ники.
     if len(nick_norm) >= 5:
         for cand in ocr_candidates:
-            # Разница длин не более 1 символа — иначе это разные слова
-            if abs(len(cand) - len(nick_norm)) <= 1 and _levenshtein(nick_norm, cand) <= 1:
+            if abs(len(cand) - len(nick_norm)) <= 2 and _levenshtein(nick_norm, cand) <= 2:
                 return True
 
     return False
@@ -334,10 +351,11 @@ def _validate_players(players: list[dict], matched: list[str], ocr_text: str | N
         known_on_screen = sum(1 for c in nick_like if c in known_norms)
         unknown_on_screen = total_on_screen - known_on_screen
 
-        # Отклоняем только если чужих ников БОЛЬШЕ чем игроков комнаты —
-        # это значит скрин точно от другого матча.
-        # Дублирование ников (UI preview, scoreboard) не считается чужим.
-        if unknown_on_screen > total_expected:
+        # Отклоняем только если нашли НУЛЕВЫХ известных игроков и при этом
+        # на экране куча чужих ников — значит скрин явно от другого матча.
+        # Если хотя бы один известный игрок распознан, валидацию по количеству
+        # пропускаем: OCR-мусор (иконки, теги) легко даёт +1-2 лишних токена.
+        if known_on_screen == 0 and unknown_on_screen > total_expected:
             return ValidationError(
                 reason=(
                     f"❌ Формат {size}v{size}: на скрине найдено **{total_on_screen}** ников, "
