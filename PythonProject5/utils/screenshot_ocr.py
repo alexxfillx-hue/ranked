@@ -375,10 +375,28 @@ def _find_verdict(text: str) -> Optional[str]:
         # OCR читает ПОРАЖЕНИЕ латиницей: nOPAKEHNE / NOPAKEHNE
         # П→N, О→O, Р→P, А→A, Ж→K, Е→E, Н→H, И→N, Е→E
         r"[NПn][O0][PРp][AАa][KЖkж][EЕe][HНh][NИni][EЕe]",
+        # Расширенные варианты: Ж читается как >, X, *, Ж (кирилл.), <
+        # Н читается как H, И читается как N/I/|
+        # Паттерн покрывает ПОРА[Ж/>/</*]Е[Н/H][И/N/I]Е
+        r"[NПnP][O0Оо][PРpр][AАaа][>KЖXxkж<\*][EЕeе][HНhн][NИniи|][EЕeе]",
+        # Если OCR ломает середину — ищем характерное начало слова ПОРАЖ (≥5 букв)
+        # П→N/П, О→O/0, Р→P, А→A, Ж→K/>/X  — достаточно для уникальной идентификации
+        r"[NПnP][O0Оо][PРp][AАa][>KЖXxkж<]",
+        # Вариант с кириллицей в тексте (mixed-script UI)
+        r"ПОРАЖ",
     ]
 
     found_win  = any(re.search(p, upper) for p in win_patterns)
     found_lose = any(re.search(p, upper) for p in lose_patterns)
+
+    if not found_win and not found_lose:
+        # Логируем строки где могло быть ПОБЕДА/ПОРАЖЕНИЕ для диагностики
+        suspect_lines = [
+            ln for ln in text.splitlines()
+            if len(ln.strip()) > 3 and re.search(r"[NПnPpB6ВБ]", ln.upper())
+            and not re.search(r"^\d", ln.strip())
+        ][:5]
+        log.debug("_find_verdict: вердикт не найден. Подозрительные строки OCR: %s", suspect_lines)
 
     if found_win and not found_lose:
         return "win_top"
@@ -793,6 +811,9 @@ _WIN_PATTERNS_RE  = [re.compile(p) for p in [
 _LOSE_PATTERNS_RE = [re.compile(p) for p in [
     r"ПОРАЖЕНИЕ", r"П0РАЖЕНИЕ", r"DEFEAT", r"\bLOSS\b", r"\bLOSE\b",
     r"[NПn][O0][PРp][AАa][KЖkж][EЕe][HНh][NИni][EЕe]",
+    r"[NПnP][O0Оо][PРpр][AАaа][>KЖXxkж<\*][EЕeе][HНhн][NИniи|][EЕeе]",
+    r"[NПnP][O0Оо][PРp][AАa][>KЖXxkж<]",
+    r"ПОРАЖ",
 ]]
 
 
