@@ -31,12 +31,15 @@ log = logging.getLogger("bot.ocr")
 
 # Ленивая загрузка зависимостей
 try:
-    import pytesseract
+    from rapidocr_onnxruntime import RapidOCR
     from PIL import Image
+    import numpy as np
+    _rapid = RapidOCR()   # singleton — инициализируем один раз при старте
     _OCR_AVAILABLE = True
-except ImportError:
+    log.info("RapidOCR (ONNX) загружен успешно.")
+except ImportError as _e:
     _OCR_AVAILABLE = False
-    log.warning("pytesseract / Pillow не установлены.")
+    log.warning("rapidocr_onnxruntime / Pillow / numpy не установлены: %s", _e)
 
 try:
     import aiohttp
@@ -609,50 +612,70 @@ async def _download_image(url: str) -> bytes:
             return await resp.read()
 
 
-def _preprocess_image(img) -> list:
-    from PIL import ImageOps, ImageEnhance
-    results = []
+def _preprocess_variants(img: "Image.Image") -> "list[np.ndarray]":
+    """
+    Возвращает несколько numpy RGB-вариантов изображения для RapidOCR.
+
+    Варианты:
+      1. Оригинал x2 — базовый.
+      2. Инверт x2 — светлый текст на тёмном фоне (типичный игровой UI).
+      3. Кроп шапки x3 — ПОБЕДА/ПОРАЖЕНИЕ обычно в верхней четверти.
+      4. Инверт шапки — тёмный заголовок.
+    """
+    from PIL import ImageOps
+    variants: list = []
     w, h = img.size
-    img_big = img.resize((w * 2, h * 2), Image.LANCZOS)
-    gray = img_big.convert("L")
+    rgb = img.convert("RGB")
 
-    results.append(ImageOps.invert(gray))
-    results.append(ImageEnhance.Sharpness(ImageEnhance.Contrast(gray).enhance(3.0)).enhance(2.0))
-    results.append(gray.point(lambda p: 255 if p > 100 else 0))
-    results.append(gray.point(lambda p: 0 if p > 100 else 255))
+    big = rgb.resize((w * 2, h * 2), Image.LANCZOS)
+    variants.append(np.array(big))
+    variants.append(np.array(ImageOps.invert(big)))
 
-    top_h   = max(60, h // 4)
-    top_big = img.crop((0, 0, w, top_h)).resize((w * 3, top_h * 3), Image.LANCZOS)
-    top_gray = top_big.convert("L")
-    results.append(ImageOps.invert(top_gray))
-    results.append(top_gray)
+    top_h = max(60, h // 4)
+    top = rgb.crop((0, 0, w, top_h)).resize((w * 3, top_h * 3), Image.LANCZOS)
+    variants.append(np.array(top))
+    variants.append(np.array(ImageOps.invert(top)))
 
-    return results
+    return variants
 
 
 def _run_ocr(image_data: bytes) -> str:
+    """
+    Запускает RapidOCR по нескольким вариантам предобработки.
+
+    RapidOCR возвращает list of [box, text, score] | None.
+    Дедупликация одинаковых строк между вариантами через seen-set.
+    Ранний выход как только найдено ПОБЕДА/ПОРАЖЕНИЕ/VICTORY/DEFEAT.
+    """
     img = Image.open(io.BytesIO(image_data))
     if img.mode not in ("RGB", "RGBA"):
         img = img.convert("RGB")
 
-    configs = [
-        r"--oem 3 --psm 6 -l rus+eng",
-        r"--oem 3 --psm 3 -l rus+eng",
-        r"--oem 3 --psm 11 -l rus+eng",
-    ]
     win_keywords = ("ПОБЕДА", "ПОРАЖЕНИЕ", "VICTORY", "DEFEAT")
-    all_texts = []
+    all_lines: list = []
+    seen: set = set()
 
-    for variant in _preprocess_image(img):
-        for cfg in configs:
-            try:
-                text = pytesseract.image_to_string(variant, config=cfg)
-                if not text.strip():
-                    continue
-                all_texts.append(text)
-                if any(kw in text.upper() for kw in win_keywords):
-                    return "\n".join(all_texts)
-            except Exception:
+    for variant in _preprocess_variants(img):
+        try:
+            result, _ = _rapid(variant)
+        except Exception as e:
+            log.debug("RapidOCR variant error: %s", e)
+            continue
+
+        if not result:
+            continue
+
+        for item in result:
+            text = item[1] if len(item) > 1 else ""
+            if not text or not text.strip():
                 continue
+            line = text.strip()
+            if line not in seen:
+                seen.add(line)
+                all_lines.append(line)
 
-    return "\n".join(all_texts) if all_texts else ""
+        combined = "\n".join(all_lines).upper()
+        if any(kw in combined for kw in win_keywords):
+            break
+
+    return "\n".join(all_lines)
