@@ -428,15 +428,14 @@ def _find_team_first_position(team_players: list[dict], ocr_text: str) -> int:
 
 def _determine_winner_team(verdict: str, players: list[dict], matched: list[str], ocr_text: str = "") -> tuple[int, str]:
     """
-    Определяет победившую команду исходя из вердикта и РЕАЛЬНОГО расположения команд на скрине.
+    Определяет победившую команду.
 
     Алгоритм:
-      1. Находим позицию первого ника каждой команды в OCR-тексте.
-      2. Та команда, чьи ники встречаются раньше — «верхняя» на скрине.
-      3. win_top  → верхняя команда победила (ПОБЕДА/VICTORY стоит раньше).
-      4. win_bottom → верхняя команда проиграла.
-
-    Если позиции определить невозможно (нет OCR-текста) — используем team1 как «верхнюю».
+      1. Находим позицию слова ПОБЕДА/VICTORY в OCR-тексте.
+      2. Находим позицию первого ника каждой команды в OCR-тексте.
+      3. Та команда чьи ники идут ДО слова ПОБЕДА — победитель.
+         (На скрине победители стоят выше, их ники в OCR встречаются раньше ПОБЕДА)
+      4. Если позиции определить невозможно — используем старую логику top/bottom.
     """
     matched_set = set(matched)
     t1_found = [p for p in players if p["team"] == 1 and p["username"] in matched_set]
@@ -444,39 +443,55 @@ def _determine_winner_team(verdict: str, players: list[dict], matched: list[str]
 
     confidence = "high"
 
-    # Определяем какая команда реально стоит выше на скрине
-    top_team = 1  # дефолт если не можем определить
     if ocr_text and t1_found and t2_found:
+        ocr_upper = ocr_text.upper()
+
+        # Позиция слова ПОБЕДА / VICTORY в тексте
+        win_keywords = [r"ПОБЕДА", r"П0БЕДА", r"VICTORY"]
+        победа_pos = min(
+            (m.start() for kw in win_keywords for m in re.finditer(kw, ocr_upper)),
+            default=None,
+        )
+
         pos1 = _find_team_first_position(t1_found, ocr_text)
         pos2 = _find_team_first_position(t2_found, ocr_text)
+
         log.debug(
-            "OCR team positions: team1_first=%d team2_first=%d → top_team=%d",
-            pos1, pos2, 1 if pos1 <= pos2 else 2,
+            "OCR positions: победа=%s team1_first=%d team2_first=%d",
+            победа_pos, pos1, pos2,
         )
-        if pos1 <= pos2:
-            top_team = 1  # Команда 1 стоит выше на скрине
+
+        if победа_pos is not None:
+            # Команда чьи ники идут ДО слова ПОБЕДА — победитель
+            # (победители всегда в верхней части таблицы, до заголовка ПОБЕДА или сразу под ним)
+            # Если обе команды до ПОБЕДА — берём ту что ближе к ПОБЕДА (но до него)
+            # Если ни одна не до ПОБЕДА — берём ту что ближе к нему
+            if pos1 <= победа_pos and pos2 > победа_pos:
+                winner_team = 1
+            elif pos2 <= победа_pos and pos1 > победа_pos:
+                winner_team = 2
+            else:
+                # Обе до или обе после — берём ту чьи ники идут раньше в тексте
+                winner_team = 1 if pos1 <= pos2 else 2
         else:
-            top_team = 2  # Команда 2 стоит выше на скрине
+            # ПОБЕДА не найдена в тексте — используем позиции команд
+            # win_top → верхняя (раньше в тексте) победила
+            # win_bottom → нижняя победила
+            top_team = 1 if pos1 <= pos2 else 2
+            bottom_team = 2 if top_team == 1 else 1
+            winner_team = top_team if verdict == "win_top" else bottom_team
+
     else:
         log.warning(
             "OCR: не удалось определить позиции команд на скрине "
-            "(t1_found=%d t2_found=%d ocr_len=%d) — используем team1 как верхнюю",
+            "(t1_found=%d t2_found=%d ocr_len=%d) — используем team1 как победителя при win_top",
             len(t1_found), len(t2_found), len(ocr_text),
         )
-
-    bottom_team = 2 if top_team == 1 else 1
-
-    # win_top: ПОБЕДА/VICTORY встретилась РАНЬШЕ чем ПОРАЖЕНИЕ/DEFEAT
-    # → верхняя команда победила
-    if verdict == "win_top":
-        winner_team = top_team
-    else:
-        # win_bottom: ПОРАЖЕНИЕ встретилось раньше → верхняя проиграла
-        winner_team = bottom_team
+        winner_team = 1 if verdict == "win_top" else 2
 
     log.info(
-        "OCR winner determination: verdict=%s top_team=%d bottom_team=%d → winner_team=%d",
-        verdict, top_team, bottom_team, winner_team,
+        "OCR winner determination: verdict=%s → winner_team=%d",
+        verdict, winner_team,
     )
     return winner_team, confidence
 
