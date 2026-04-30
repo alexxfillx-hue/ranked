@@ -185,38 +185,39 @@ def _extract_ocr_names(ocr_text: str) -> list[str]:
     return list(candidates)
 
 
-def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str, ocr_text: str = "") -> bool:
+def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str) -> bool:
+    """
+    Проверяет, найден ли ник игрока Discord в OCR-тексте.
+
+    Шаги (от строгого к мягкому):
+      1. Точное совпадение с одним из «кандидатов» (токенов строк OCR).
+         Это защищает от того что "test" найдётся внутри "test2".
+      2. Вхождение ника как отдельного слова (word-boundary) в полный нормализованный текст.
+      3. Расстояние Левенштейна ≤ 1 (опечатка OCR в 1 символ) только для ников ≥ 5 символов
+         и только если кандидат той же длины ± 1 (не допускаем совпадения коротких ников).
+    """
     nick_norm = _normalize(nick)
     if not nick_norm or len(nick_norm) < 2:
         return False
 
-    # 1. Точное совпадение с токеном строки
+    # 1. Точное совпадение с токеном строки (самый надёжный путь)
     if nick_norm in ocr_candidates:
         return True
 
-    # 2. Ник как отдельное слово в полном тексте
+    # 2. Ник как отдельное слово в полном тексте (word-boundary через regex)
+    #    Используем \b-подобный подход: ник должен быть окружён не-словесными символами
+    #    или началом/концом строки.
     pattern = r"(?<![a-zA-Z0-9_\u0400-\u04FF])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_\u0400-\u04FF])"
     if re.search(pattern, ocr_full_norm):
         return True
 
-    # 3. Левенштейн ≤ 1 для ников ≥ 5 символов
+    # 3. Расстояние Левенштейна ≤ 1 — только для длинных ников (≥ 5 символов)
+    #    и только если кандидат похожей длины, чтобы "test" не совпал с "test2"
     if len(nick_norm) >= 5:
         for cand in ocr_candidates:
+            # Разница длин не более 1 символа — иначе это разные слова
             if abs(len(cand) - len(nick_norm)) <= 1 and _levenshtein(nick_norm, cand) <= 1:
                 return True
-
-    # 4. Построчный поиск после удаления тегов — для ников с цифрами (2x2, d4d)
-    if ocr_text:
-        for line in ocr_text.splitlines():
-            cleaned = re.sub(r"[\[{(][^\]})]{1,20}[\]})]", "", line).strip()
-            tokens = cleaned.split()
-            for tok in tokens[:3]:
-                tok_norm = _normalize(tok)
-                if tok_norm == nick_norm:
-                    return True
-                if len(nick_norm) >= 5 and abs(len(tok_norm) - len(nick_norm)) <= 1:
-                    if _levenshtein(nick_norm, tok_norm) <= 1:
-                        return True
 
     return False
 
@@ -232,7 +233,7 @@ def _match_players(ocr_text: str, players: list[dict]) -> list[str]:
     matched = []
     for p in players:
         nick = p["username"]
-        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm, ocr_text):
+        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm):
             matched.append(nick)
 
     return matched
@@ -282,7 +283,7 @@ def _count_nicks_on_screenshot(ocr_text: str, all_known_players: list[dict]) -> 
     found_nicks = set()
     for p in all_known_players:
         nick = p["username"]
-        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm, ocr_text):
+        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm):
             found_nicks.add(nick)
 
     return len(found_nicks)
@@ -324,18 +325,19 @@ def _validate_players(players: list[dict], matched: list[str], ocr_text: str | N
     # Поэтому главная защита — сравнение matched с total_expected СТРОГО (==).
     if ocr_text is not None:
         nicks_found = _count_nicks_on_screenshot(ocr_text, players)
-        # nicks_found > total_expected невозможно (мы ищем только по players),
-        # но nicks_found < total_expected значит не все нашлись.
-        # Главное: если на скрине ВИДНО больше ников чем в комнате — OCR распознал
-        # чужих игроков, они просто не попали в matched. Проверяем через ocr_candidates:
         ocr_candidates = _extract_ocr_names(ocr_text)
-        # Фильтруем мусорные токены: оставляем только «никоподобные» —
-        # длина ≥ 3, нет чисто числовых, нет служебных слов
-        # _extract_ocr_names возвращает только реальные ники через _PLAYER_LINE_RE
         nick_like = [c for c in ocr_candidates if len(c) >= 2]
         total_on_screen = len(nick_like)
 
-        if total_on_screen > total_expected:
+        # Считаем сколько из найденных OCR-токенов совпадают с игроками комнаты
+        known_norms = {_normalize(p["username"]) for p in players}
+        known_on_screen = sum(1 for c in nick_like if c in known_norms)
+        unknown_on_screen = total_on_screen - known_on_screen
+
+        # Отклоняем только если чужих ников БОЛЬШЕ чем игроков комнаты —
+        # это значит скрин точно от другого матча.
+        # Дублирование ников (UI preview, scoreboard) не считается чужим.
+        if unknown_on_screen > total_expected:
             return ValidationError(
                 reason=(
                     f"❌ Формат {size}v{size}: на скрине найдено **{total_on_screen}** ников, "
@@ -565,11 +567,9 @@ async def _download_image(url: str) -> bytes:
 
 
 def _preprocess_image(img) -> list:
-    from PIL import ImageOps, ImageEnhance, ImageFilter
+    from PIL import ImageOps, ImageEnhance
     results = []
     w, h = img.size
-
-    # --- Базовые варианты на полном изображении ---
     img_big = img.resize((w * 2, h * 2), Image.LANCZOS)
     gray = img_big.convert("L")
 
@@ -578,45 +578,11 @@ def _preprocess_image(img) -> list:
     results.append(gray.point(lambda p: 255 if p > 100 else 0))
     results.append(gray.point(lambda p: 0 if p > 100 else 255))
 
-    # --- Верхняя часть (заголовок ПОБЕДА/DEFEAT) ---
     top_h   = max(60, h // 4)
     top_big = img.crop((0, 0, w, top_h)).resize((w * 3, top_h * 3), Image.LANCZOS)
     top_gray = top_big.convert("L")
     results.append(ImageOps.invert(top_gray))
     results.append(top_gray)
-
-    # --- Специальная обработка для строк на цветном фоне (синий/красный) ---
-    # Извлекаем каналы RGB отдельно — на синем фоне белый текст хорошо виден в R/G каналах
-    try:
-        img_big_rgb = img.resize((w * 2, h * 2), Image.LANCZOS).convert("RGB")
-        r, g, b = img_big_rgb.split()
-
-        # Красный канал — хорошо выделяет текст на синем фоне
-        r_inv = ImageOps.invert(r)
-        results.append(r_inv)
-        results.append(r)
-
-        # Зелёный канал
-        g_inv = ImageOps.invert(g)
-        results.append(g_inv)
-
-        # Комбинация R+G (убирает синий фон)
-        from PIL import ImageChops
-        rg = ImageChops.add(r, g)
-        results.append(ImageOps.invert(rg))
-
-        # Высокий контраст на RGB
-        enhanced = ImageEnhance.Contrast(img_big_rgb).enhance(4.0)
-        enhanced_gray = enhanced.convert("L")
-        results.append(enhanced_gray)
-        results.append(ImageOps.invert(enhanced_gray))
-
-        # Бинаризация с низким порогом — для светлого текста на тёмном фоне
-        results.append(enhanced_gray.point(lambda p: 255 if p > 60 else 0))
-        results.append(enhanced_gray.point(lambda p: 255 if p > 150 else 0))
-
-    except Exception:
-        pass
 
     return results
 
