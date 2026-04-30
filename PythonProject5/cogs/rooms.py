@@ -2585,16 +2585,6 @@ class Rooms(commands.Cog):
         except ImportError:
             pass
 
-        # Сообщаем игрокам что бот анализирует скрин
-        analyzing_msg = None
-        if analyze_screenshot is not None:
-            try:
-                analyzing_msg = await message.channel.send(
-                    "🔍 NRT is analyzing the screenshot, please wait..."
-                )
-            except Exception:
-                pass
-
         ocr_result = None
         if analyze_screenshot is not None:
             try:
@@ -2603,13 +2593,6 @@ class Rooms(commands.Cog):
             except Exception as _ocr_err:
                 import logging
                 logging.getLogger("bot").warning("OCR analysis failed: %s", _ocr_err)
-
-        # Удаляем сообщение "analyzing..." после завершения OCR
-        if analyzing_msg is not None:
-            try:
-                await analyzing_msg.delete()
-            except Exception:
-                pass
 
         # FIX 4: сохраняем URL первого скрина ВСЕГДА (для прикрепления при финализации)
         if image_attachments:
@@ -2622,30 +2605,23 @@ class Rooms(commands.Cog):
             team1_nicks = ", ".join(f"**{p['username']}**" for p in players if p["team"] == 1)
             team2_nicks = ", ".join(f"**{p['username']}**" for p in players if p["team"] == 2)
 
-            caps = [p for p in players if p["is_captain"]]
-            cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
-
             await db.add_screenshot(room_id, my_team, message.author.id)
             await message.add_reaction("❓")
 
             reject_embed = discord.Embed(
-                title="⚠️ Скриншот не распознан автоматически",
+                title="⚠️ Screenshot not recognized automatically",
                 description=(
-                    f"🤖 OCR не смог подтвердить игроков этой комнаты.\n\n"
-                    f"**Причина:** {val_err.reason}\n\n"
-                    f"**Ожидались игроки ({size}v{size}):**\n"
-                    f"🔵 Команда 1: {team1_nicks}\n"
-                    f"🔴 Команда 2: {team2_nicks}\n\n"
-                    f"Если скрин верный — **проголосуйте вручную кнопками ниже**.\n"
-                    f"Если скрин неверный — загрузи правильный скрин таблицы результатов."
+                    f"🤖 OCR could not confirm the players of this room.\n\n"
+                    f"**Reason:** {val_err.reason}\n\n"
+                    f"**Expected players ({size}v{size}):**\n"
+                    f"🔵 Team 1: {team1_nicks}\n"
+                    f"🔴 Team 2: {team2_nicks}\n\n"
+                    f"If the screenshot is correct — **vote manually using the buttons below**.\n"
+                    f"If the screenshot is wrong — upload the correct result screen."
                 ),
                 color=0xED4245,
             )
-            await message.channel.send(
-                f"{cap_mentions} — скрин не принят, требуется ручное голосование.",
-                embed=reject_embed,
-                view=VoteEndView(room_id),
-            )
+            await message.channel.send(embed=reject_embed, view=VoteEndView(room_id))
             return
 
         # ManualVoteNeeded — OCR нашёл игроков, но не определил победителя
@@ -2657,11 +2633,11 @@ class Rooms(commands.Cog):
             screenshots = await db.get_screenshots(room_id)
             if len(screenshots) == 1:
                 results_channel = await self._get_or_create_results_channel(message.guild)
-                team_label = "🔵 Команда 1" if my_team == 1 else "🔴 Команда 2"
+                team_label = "🔵 Team 1" if my_team == 1 else "🔴 Team 2"
                 files = [await att.to_file() for att in image_attachments]
                 if files:
                     await results_channel.send(
-                        f"📸 **Матч #{room_id}** · {team_label} · {message.author.mention} *(ручное голосование)*",
+                        f"📸 **Match #{room_id}** · {team_label} · {message.author.mention} *(manual vote)*",
                         files=files,
                     )
 
@@ -2669,32 +2645,24 @@ class Rooms(commands.Cog):
             cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
             matched_info = ""
             if ocr_result.matched_players:
-                matched_info = f"\nРаспознаны: {', '.join(ocr_result.matched_players)}"
+                matched_info = f"\nRecognized: {', '.join(ocr_result.matched_players)}"
 
             if room["mode"] == "team":
                 vote_desc = (
-                    f"✅ Скриншот принят — все {ocr_result.found_count} игроков найдены.{matched_info}\n"
-                    "⚠️ Не удалось автоматически определить победителя (ПОБЕДА/ПОРАЖЕНИЕ не найдены).\n"
-                    "**Хотя бы один игрок от каждой команды** должен нажать кнопку результата:\n"
-                    "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**\n\n"
                     f"✅ Screenshot accepted — all {ocr_result.found_count} players found.{matched_info}\n"
-                    "⚠️ Could not determine winner automatically (WIN/LOSS text not found).\n"
+                    "⚠️ Could not determine the winner automatically (WIN/LOSS text not found).\n"
                     "**At least one player from each team** must press the result button:\n"
                     "**(🏆 Win + 💀 Loss)** or **(🤝 Draw + 🤝 Draw)**"
                 )
             else:
                 vote_desc = (
-                    f"✅ Скриншот принят — все {ocr_result.found_count} игроков найдены.{matched_info}\n"
-                    "⚠️ Не удалось автоматически определить победителя (ПОБЕДА/ПОРАЖЕНИЕ не найдены).\n"
-                    f"{cap_mentions} — нажмите кнопку с вашим результатом:\n"
-                    "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**\n\n"
                     f"✅ Screenshot accepted — all {ocr_result.found_count} players found.{matched_info}\n"
-                    "⚠️ Could not determine winner automatically (WIN/LOSS text not found).\n"
+                    "⚠️ Could not determine the winner automatically (WIN/LOSS text not found).\n"
                     f"{cap_mentions} — press the button with your result:\n"
                     "**(🏆 Win + 💀 Loss)** or **(🤝 Draw + 🤝 Draw)**"
                 )
             vote_embed = discord.Embed(
-                title="📸 Скриншот принят! Нужно ручное голосование / Screenshot accepted! Manual vote needed",
+                title="📸 Screenshot accepted! Manual vote needed",
                 description=vote_desc,
                 color=0xF1C40F,
             )
@@ -2714,27 +2682,27 @@ class Rooms(commands.Cog):
                 team_vote = v1 if p["team"] == 1 else v2
                 await db.set_end_vote(room_id, p["discord_id"], team_vote)
 
-            confidence_label = "🟢 Высокая" if ocr_result.confidence == "high" else "🟡 Средняя"
+            confidence_label = "🟢 High" if ocr_result.confidence == "high" else "🟡 Medium"
             winner_emoji = "🔵" if winner_team == 1 else "🔴"
-            team_name = f"Команда {winner_team}"
+            team_name = f"Team {winner_team}"
 
             matched_info = ""
             if ocr_result.matched_players:
-                matched_info = f"\nРаспознаны игроки: {', '.join(ocr_result.matched_players[:8])}"
+                matched_info = f"\nRecognized players: {', '.join(ocr_result.matched_players[:8])}"
 
             ocr_embed = discord.Embed(
-                title="🤖 Результат определён автоматически по скриншоту",
+                title="🤖 Result determined automatically from screenshot",
                 description=(
-                    f"{winner_emoji} **{team_name} победила!**\n"
-                    f"Уверенность OCR: {confidence_label}{matched_info}\n\n"
-                    f"Завершаю игру..."
+                    f"{winner_emoji} **{team_name} wins!**\n"
+                    f"OCR confidence: {confidence_label}{matched_info}\n\n"
+                    f"Finalizing the game..."
                 ),
                 color=0x57F287 if winner_team == 1 else 0xE74C3C,
             )
             await message.channel.send(embed=ocr_embed)
 
             results_channel = await self._get_or_create_results_channel(message.guild)
-            team_label = "🔵 Команда 1" if my_team == 1 else "🔴 Команда 2"
+            team_label = "🔵 Team 1" if my_team == 1 else "🔴 Team 2"
             files = [await att.to_file() for att in image_attachments]
             if files:
                 await results_channel.send(
@@ -2763,19 +2731,19 @@ class Rooms(commands.Cog):
                         )
             return
 
-        # OCR недоступен — ручное голосование
+        # OCR unavailable — manual vote
         await db.add_screenshot(room_id, my_team, message.author.id)
         await message.add_reaction("✅")
 
-        # FIX 4: пересылаем скрин в канал результатов сразу
+        # FIX 4: forward screenshot to results channel immediately
         screenshots = await db.get_screenshots(room_id)
         if len(screenshots) == 1:
             results_channel = await self._get_or_create_results_channel(message.guild)
-            team_label = "🔵 Команда 1" if my_team == 1 else "🔴 Команда 2"
+            team_label = "🔵 Team 1" if my_team == 1 else "🔴 Team 2"
             files = [await att.to_file() for att in image_attachments]
             if files:
                 await results_channel.send(
-                    f"📸 **Матч #{room_id}** · {team_label} · {message.author.mention} *(OCR недоступен)*",
+                    f"📸 **Match #{room_id}** · {team_label} · {message.author.mention} *(OCR unavailable)*",
                     files=files,
                 )
 
@@ -2784,10 +2752,6 @@ class Rooms(commands.Cog):
 
         if room["mode"] == "team":
             vote_desc = (
-                f"Скриншот от {message.author.mention} принят.\n"
-                "🤖 Не удалось проверить скриншот автоматически (OCR недоступен).\n"
-                "**Хотя бы один игрок от каждой команды** должен нажать кнопку результата:\n"
-                "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**\n\n"
                 f"Screenshot from {message.author.mention} accepted.\n"
                 "🤖 Could not verify screenshot automatically (OCR unavailable).\n"
                 "**At least one player from each team** must press the result button:\n"
@@ -2795,17 +2759,13 @@ class Rooms(commands.Cog):
             )
         else:
             vote_desc = (
-                f"Скриншот от {message.author.mention} принят.\n"
-                "🤖 Не удалось проверить скриншот автоматически (OCR недоступен).\n"
-                f"{cap_mentions} — нажмите кнопку с вашим результатом:\n"
-                "**(🏆 Победа + 💀 Поражение)** или **(🤝 Ничья + 🤝 Ничья)**\n\n"
                 f"Screenshot from {message.author.mention} accepted.\n"
                 "🤖 Could not verify screenshot automatically (OCR unavailable).\n"
                 f"{cap_mentions} — press the button with your result:\n"
                 "**(🏆 Win + 💀 Loss)** or **(🤝 Draw + 🤝 Draw)**"
             )
         vote_embed = discord.Embed(
-            title="📸 Скриншот получен! / Screenshot received! — Голосование / Vote",
+            title="📸 Screenshot received! — Vote required",
             description=vote_desc,
             color=0xF1C40F,
         )
