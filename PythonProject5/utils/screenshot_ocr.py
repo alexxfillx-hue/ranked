@@ -295,6 +295,15 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str)
     if nick_norm in ocr_candidates:
         return True
 
+    # 1.5. Токен начинается с ника и после ника идут буквы (не цифры) — это UID/системная строка:
+    #   "UID:2x2|TYPE:..." → нормализуется в "uid2x2typeelectron..." → начинается с "2x2"
+    #   Условие "после не цифра" исключает "2x23" (другой ник) vs "2x2typeelectron" (системный мусор)
+    if any(
+        c.startswith(nick_norm) and (len(c) == len(nick_norm) or not c[len(nick_norm)].isdigit())
+        for c in ocr_candidates
+    ):
+        return True
+
     # 2. Ник как отдельное слово в полном тексте (word-boundary через regex)
     #    Используем \b-подобный подход: ник должен быть окружён не-словесными символами
     #    или началом/концом строки.
@@ -332,8 +341,17 @@ def _match_players(ocr_text: str, players: list[dict]) -> list[str]:
 
 def _find_verdict(text: str) -> Optional[str]:
     upper = text.upper()
-    win_patterns  = [r"ПОБЕДА", r"П0БЕДА", r"VICTORY", r"\bWIN\b"]
-    lose_patterns = [r"ПОРАЖЕНИЕ", r"П0РАЖЕНИЕ", r"DEFEAT", r"\bLOSS\b", r"\bLOSE\b"]
+    win_patterns  = [
+        r"ПОБЕДА", r"П0БЕДА", r"VICTORY", r"\bWIN\b",
+        # OCR читает кириллицу латиницей: ПОБЕДА → POBEDA / HOBEDA / NOBEDA
+        r"[NПP][O0][ВB][Е3E][ДD][АA]",
+    ]
+    lose_patterns = [
+        r"ПОРАЖЕНИЕ", r"П0РАЖЕНИЕ", r"DEFEAT", r"\bLOSS\b", r"\bLOSE\b",
+        # OCR читает ПОРАЖЕНИЕ латиницей: nOPAKEHNE / NOPAKEHNE
+        # П→N, О→O, Р→P, А→A, Ж→K, Е→E, Н→H, И→N, Е→E
+        r"[NПn][O0][PРp][AАa][KЖkж][EЕe][HНh][NИni][EЕe]",
+    ]
 
     found_win  = any(re.search(p, upper) for p in win_patterns)
     found_lose = any(re.search(p, upper) for p in lose_patterns)
@@ -501,22 +519,60 @@ def _validate_players(players: list[dict], matched: list[str], ocr_text: str | N
 
 def _find_team_first_position(team_players: list[dict], ocr_text: str) -> int:
     """
-    Возвращает позицию (символьный индекс) первого упоминания любого ника из команды в OCR-тексте.
+    Возвращает НОМЕР СТРОКИ первого упоминания любого ника из команды в OCR-тексте.
     Если никто не найден — возвращает 999999.
     Используется для определения какая команда стоит ВЫШЕ в таблице результатов.
+
+    Важно: ищем по строкам, а НЕ в слипшемся нормализованном тексте.
+    _normalize() удаляет переносы строк и все разделители — ники склеиваются
+    с соседними токенами и word-boundary перестаёт работать:
+      "[D.3s] alekz\n6666"  ->  "d3salekz6666"  -> граница не найдена.
+    Поиск по строкам лишён этого недостатка.
     """
-    ocr_norm = _normalize(ocr_text)
-    earliest = 999999
+    lines = ocr_text.splitlines()
+    positions: dict[str, int] = {}  # username -> line_no
+
     for p in team_players:
         nick_norm = _normalize(p["username"])
         if not nick_norm:
             continue
-        # Ищем точное вхождение как отдельное слово
-        pattern = r"(?<![a-zA-Z0-9_\u0400-\u04FF])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_\u0400-\u04FF])"
-        m = re.search(pattern, ocr_norm)
-        if m and m.start() < earliest:
-            earliest = m.start()
-    return earliest
+        for line_no, line in enumerate(lines):
+            # Вырезаем тег перед нормализацией: "[D.3s] alekz" → "alekz",
+            # иначе _normalize склеит тег с ником → граница не найдена.
+            line_stripped = _strip_tag(line.strip())
+            line_norm = _normalize(line_stripped)
+            # Точное совпадение нормализованной строки с ником
+            if line_norm == nick_norm:
+                positions[p["username"]] = line_no
+                break
+            # Ник как подстрока в пределах одной строки (граница работает)
+            pattern = r"(?<![a-zA-Z0-9_\u0400-\u04FF])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_\u0400-\u04FF])"
+            if re.search(pattern, line_norm):
+                positions[p["username"]] = line_no
+                break
+
+    if not positions:
+        return 999999
+
+    # Если все игроки найдены — берём минимальный номер строки
+    if len(positions) == len(team_players):
+        return min(positions.values())
+
+    # Если часть игроков не найдена (OCR не распознал строку с именем):
+    # Используем эвристику: ищем числовые строки (GS ≥ 3 цифр) ДО строки
+    # ближайшего найденного игрока. Если такие есть — не-найденный игрок
+    # стоит ВЫШЕ (его данные идут первыми в таблице).
+    known_min = min(positions.values())
+    numbers_before = [
+        i for i, ln in enumerate(lines)
+        if i < known_min and re.match(r"^\d{3,}$", ln.strip())
+    ]
+    if numbers_before:
+        # Не-найденный игрок выше — его позиция примерно min(numbers_before)
+        return min(numbers_before)
+
+    # Числовых строк до найденного нет → не-найденный, вероятно, НИЖЕ
+    return known_min + 1
 
 
 def _determine_winner_team(verdict: str, players: list[dict], matched: list[str], ocr_text: str = "") -> tuple[int, str]:
@@ -546,6 +602,29 @@ def _determine_winner_team(verdict: str, players: list[dict], matched: list[str]
             "OCR team positions: team1_first=%d team2_first=%d → top_team=%d",
             pos1, pos2, 1 if pos1 <= pos2 else 2,
         )
+        # Эвристика: если один игрок не найден по имени (pos=999999),
+        # но другой найден на строке K, смотрим есть ли числовые строки (GS)
+        # ДО строки K. Если есть — не-найденный игрок стоит ВЫШЕ в таблице.
+        # Пример: "[idc] 2x2" не распознан OCR → pos2=999999,
+        # но 9640 (GS 2x2) стоит на строке 6, alekz на строке 10 → 2x2 выше.
+        ocr_lines = ocr_text.splitlines() if ocr_text else []
+        if pos2 == 999999 and pos1 < 999999 and ocr_lines:
+            numbers_before = [
+                i for i, ln in enumerate(ocr_lines)
+                if i < pos1 and re.match(r"^\d{3,}$", ln.strip())
+            ]
+            if numbers_before:
+                pos2 = min(numbers_before)
+                log.debug("OCR pos heuristic: team2 name not found, using GS line %d (before team1 at %d)", pos2, pos1)
+        elif pos1 == 999999 and pos2 < 999999 and ocr_lines:
+            numbers_before = [
+                i for i, ln in enumerate(ocr_lines)
+                if i < pos2 and re.match(r"^\d{3,}$", ln.strip())
+            ]
+            if numbers_before:
+                pos1 = min(numbers_before)
+                log.debug("OCR pos heuristic: team1 name not found, using GS line %d (before team2 at %d)", pos1, pos2)
+
         if pos1 <= pos2:
             top_team = 1  # Команда 1 стоит выше на скрине
         else:
