@@ -2363,6 +2363,7 @@ class Rooms(commands.Cog):
             return
 
         self._finalize_locks.pop(room_id, None)
+        self._last_screenshot_url.pop(room_id, None)
         self._pick_message_ids.pop(room_id, None)
 
         team1 = [p for p in players if p["team"] == 1]
@@ -2485,31 +2486,15 @@ class Rooms(commands.Cog):
         results_embed.timestamp = discord.utils.utcnow()
 
         screenshots = await db.get_screenshots(room_id)
-        first_screenshot_url = self._last_screenshot_url.pop(room_id, None)
+
+        # FIX 4: забираем URL первого скрина до удаления из БД
+        first_screenshot_url = self._last_screenshot_url.get(room_id)
 
         await db.delete_screenshots(room_id)
         await db.delete_room(room_id)
         await self._refresh_lobby()
 
         results_channel = await self._get_or_create_results_channel(guild)
-
-        # Скрин ВСЕГДА идёт первым — над результатами
-        if first_screenshot_url:
-            try:
-                import aiohttp, io
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(first_screenshot_url) as resp:
-                        if resp.status == 200:
-                            data = await resp.read()
-                            ext = first_screenshot_url.split("?")[0].rsplit(".", 1)[-1] or "png"
-                            file = discord.File(io.BytesIO(data), filename=f"screenshot.{ext}")
-                            await results_channel.send(
-                                f"📸 Скриншоты матча **#{room_id}**",
-                                file=file,
-                            )
-            except Exception:
-                pass
-
         result_msg = await results_channel.send(embed=results_embed)
 
         winner_team = 0
@@ -2525,6 +2510,12 @@ class Rooms(commands.Cog):
             result_message_id=result_msg.id,
             result_channel_id=results_channel.id,
         )
+
+        # FIX 4: прикрепляем скриншот к результатам матча
+        if screenshots and first_screenshot_url:
+            await results_channel.send(
+                f"📸 Скриншот матча **#{room_id}** · {first_screenshot_url}"
+            )
 
         if channel:
             await asyncio.sleep(10)
@@ -2713,8 +2704,6 @@ class Rooms(commands.Cog):
                     f"📸 **Матч #{room_id}** · {team_label} · {message.author.mention}",
                     files=files,
                 )
-            # Скрин уже отправлен OCR — очищаем чтобы _finalize_game не дублировал
-            self._last_screenshot_url.pop(room_id, None)
 
             lock = self._finalize_locks.setdefault(room_id, asyncio.Lock())
             async with lock:
@@ -3000,7 +2989,13 @@ class Rooms(commands.Cog):
 
         await db.delete_room(room_id)
         await self._refresh_lobby()
-        await ctx.send(f"✅ Room **#{room_id}** deleted. {len(players)} player(s) removed.")
+        # Отвечаем в admin-канал если команда была в удалённом канале комнаты
+        try:
+            await ctx.send(f"✅ Room **#{room_id}** deleted. {len(players)} player(s) removed.")
+        except (discord.NotFound, discord.Forbidden):
+            admin_ch = discord.utils.get(ctx.guild.text_channels, name=Config.ADMIN_CHANNEL_NAME)
+            if admin_ch:
+                await admin_ch.send(f"✅ Room **#{room_id}** deleted by {ctx.author.mention}. {len(players)} player(s) removed.")
 
     @commands.command(name="mod_captain")
     async def mod_captain(self, ctx: commands.Context, member: discord.Member = None):
