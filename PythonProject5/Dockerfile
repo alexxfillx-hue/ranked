@@ -1,10 +1,8 @@
 FROM python:3.11-slim
 
-# Устанавливаем Tesseract + русский язык
+# libgomp нужен для onnxruntime (OpenMP), libglib2/libgl — для Pillow/numpy
 RUN apt-get update && apt-get install -y \
-    tesseract-ocr \
-    tesseract-ocr-rus \
-    tesseract-ocr-eng \
+    libgomp1 \
     libglib2.0-0 \
     libgl1 \
     && rm -rf /var/lib/apt/lists/*

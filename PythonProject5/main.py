@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import subprocess
 
 import discord
 from discord.ext import commands
@@ -14,19 +13,12 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
-# ── Проверка Tesseract при старте ──────────────────────────────────────────────
+# ── Проверка RapidOCR при старте ───────────────────────────────────────────────
 try:
-    r = subprocess.run(["tesseract", "--version"], capture_output=True, text=True)
-    version_line = r.stdout.splitlines()[0] if r.stdout else r.stderr.splitlines()[0] if r.stderr else "NO OUTPUT"
-    log.warning(f"Tesseract version: {version_line}")
-
-    r2 = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True)
-    langs_out = (r2.stdout + r2.stderr).strip()
-    log.warning(f"Tesseract langs:\n{langs_out}")
-except FileNotFoundError:
-    log.warning("Tesseract NOT FOUND — OCR анализ скриншотов недоступен. Проверь nixpacks.toml")
-except Exception as e:
-    log.warning(f"Tesseract check error: {e}")
+    from rapidocr_onnxruntime import RapidOCR as _RapidOCR
+    log.info("RapidOCR (ONNX) доступен — OCR скриншотов активен.")
+except ImportError:
+    log.warning("rapidocr_onnxruntime не установлен — OCR скриншотов недоступен.")
 # ───────────────────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.all()
