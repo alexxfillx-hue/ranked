@@ -271,10 +271,15 @@ def _extract_ocr_names(ocr_text: str) -> list[str]:
             if re.match(r"^[\d.,/]+$", tok_raw):
                 continue
             next_line = lines[i + 1] if i + 1 < len(lines) else ""
+            prev_line = lines[i - 1] if i > 0 else ""
             next_is_number = bool(re.match(r"^\d+(\.\d+)?$", next_line))
-            # Принимаем и последнюю строку (нет следующей) — иначе последний игрок в таблице
-            # всегда терял бы якорь. Пустая next_line тоже считается допустимой.
-            next_ok = next_is_number or next_line == ""
+            prev_is_number = bool(re.match(r"^\d+(\.\d+)?$", prev_line))
+            # Якорь «следующая строка — число» (GS после ника) — основной критерий.
+            # Якорь «предыдущая строка — число» нужен для последнего игрока в таблице,
+            # у которого после ника нет строки (или идёт пустая строка).
+            # Пустая next_line БЕЗ числового контекста — слишком слабый якорь:
+            # он захватывает заголовки таблицы и иконки рейтинга как ложные ники.
+            next_ok = next_is_number or (not next_line and prev_is_number)
             tok_norm = _normalize(tok_raw)
             if next_ok and len(tok_norm) >= 2 and tok_norm not in _SERVICE_WORDS:
                 candidates.add(tok_norm)
