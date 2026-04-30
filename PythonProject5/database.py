@@ -3,6 +3,7 @@ import os
 import datetime
 import asyncpg
 from config import Config
+from utils.elo import calculate_elo
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS players (
@@ -892,22 +893,34 @@ class Database:
 
                 new_results = {pid: invert(r) for pid, r in old_results.items()}
 
-                # Строим карту: discord_id → старый change из elo_history
+                # Строим карту: discord_id → строка истории
                 hist_by_pid = {h["discord_id"]: h for h in hist_rows}
 
-                # Считаем правильный new_change:
-                # Игрок менял результат win→lose или lose→win.
-                # Правильное значение change для новой роли = среднее change
-                # противоположной команды (с правильным знаком).
-                # Например: старые победители получили +8, старые проигравшие -4.
-                # После switch: старые победители должны получить -4, старые проигравшие +8.
+                # Группируем игроков по старому результату
+                old_winners = [pid for pid, r in old_results.items() if r == "win"]
+                old_losers  = [pid for pid, r in old_results.items() if r == "lose"]
 
-                # Считаем средний |change| для каждого старого результата
-                win_changes = [abs(hist_by_pid[pid]["change"]) for pid in hist_by_pid if old_results.get(pid) == "win"]
-                lose_changes = [abs(hist_by_pid[pid]["change"]) for pid in hist_by_pid if old_results.get(pid) == "lose"]
+                # Пересчитываем ELO с нуля через calculate_elo.
+                # После switch: старые победители → проигравшие, старые losers → победители.
+                # ELO каждого игрока ДО матча хранится в elo_history.elo_before.
 
-                avg_win_change = round(sum(win_changes) / len(win_changes)) if win_changes else 1
-                avg_lose_change = round(sum(lose_changes) / len(lose_changes)) if lose_changes else 1
+                # Строим список игроков для calculate_elo (нужен только ключ "elo")
+                winners_for_calc = [{"elo": hist_by_pid[pid]["elo_before"]} for pid in old_winners if pid in hist_by_pid]
+                losers_for_calc  = [{"elo": hist_by_pid[pid]["elo_before"]} for pid in old_losers  if pid in hist_by_pid]
+
+                # Режим и размер берём из match_results
+                m_mode = match_row["mode"] if match_row else "cap"
+                m_size = match_row["size"] if match_row else len(old_winners)
+
+                # После switch: бывшие losers теперь winners — считаем по их ELO
+                # бывшие winners теперь losers — считаем по их ELO
+                new_win_change  = calculate_elo(losers_for_calc,  m_size, "win")
+                new_lose_change = calculate_elo(winners_for_calc, m_size, "lose")
+
+                # Применяем коэффициент team-режима если нужно
+                if m_mode == "team":
+                    new_win_change  = max(1,  int(new_win_change  * 0.7))
+                    new_lose_change = min(-1, int(new_lose_change * 0.7))
 
                 # Для каждого игрока: откат → применение нового ELO
                 elo_changes = {}
@@ -918,23 +931,18 @@ class Database:
                     if not old_result or not new_result:
                         continue
 
-                    elo_before_orig = h["elo_before"]   # ELO до старого матча
+                    elo_before_orig = h["elo_before"]
 
-                    # Новый change берём из противоположной группы:
-                    # бывший winner теперь loser → получает то что losers теряли
-                    # бывший loser теперь winner → получает то что winners получали
                     if new_result == "win":
-                        new_change = avg_win_change   # бывшие победители получили X → теперь столько же получат бывшие losers
+                        new_change = new_win_change
                     elif new_result == "lose":
-                        new_change = -avg_lose_change  # бывшие losers теряли Y → теперь столько же потеряют бывшие winners
+                        new_change = new_lose_change
                     else:
                         new_change = 0
 
-                    # Жёсткие ограничения
-                    if new_result == "win" and new_change < 1:
-                        new_change = 1
-                    elif new_result == "lose" and new_change > -1:
-                        new_change = -1
+                    # Не уходим в минус
+                    if elo_before_orig == 0 and new_change < 0:
+                        new_change = 0
 
                     new_elo = max(0, elo_before_orig + new_change)
                     elo_changes[pid] = (elo_before_orig, new_elo, new_change, new_result, old_result)
