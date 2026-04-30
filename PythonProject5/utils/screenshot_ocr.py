@@ -197,36 +197,75 @@ def _levenshtein(a: str, b: str) -> int:
     return dp[n]
 
 
+_SERVICE_WORDS = {
+    "gs", "имя", "name", "счёт", "счет", "score",
+    "убийства", "смерти", "помощь", "kills", "deaths", "assists",
+    "kda", "yd", "уп", "yn", "пн", "dl", "nickname",
+    "победа", "поражение", "nopakehme", "nobeda",
+    "victory", "defeat", "win", "lose", "loss",
+    "draw", "ничья", "ctf", "песочница", "sandbox",
+    "team", "команда", "rating", "рейтинг", "place", "место",
+    "all", "total", "necouhmlia", "necoyhula", "sandboxctf",
+}
+
+# Паттерн для «ячеечного» вывода RapidOCR:
+# строка содержит только [TAG]ник (без чисел после), а цифры GS идут следующей строкой.
+# Захватываем: необязательный тег + токен без пробелов.
+_CELL_LINE_RE = re.compile(
+    r"^"
+    r"(?:[\[{(][^\]})]*[\]})]\s*)?"  # необязательный [TAG]
+    r"([^\s\[\]{}\(\)]+)"            # токен-ник
+    r"\s*$",                          # до конца строки (никаких цифр!)
+    re.UNICODE,
+)
+
+
 def _extract_ocr_names(ocr_text: str) -> list[str]:
     """
-    Извлекает «чистые» ники из OCR-текста используя _PLAYER_LINE_RE.
+    Извлекает «чистые» ники из OCR-текста двумя стратегиями:
 
-    Структура строки игрока:  [ИКОНКА]  [ТЕГ]  НИК  GS  ...
-    Иконка необязательна — OCR иногда не читает символ звания.
-    Якорь «цифра после ника» исключает заголовки и мусорные строки.
+    Стратегия A — Tesseract-формат (вся строка игрока в одну линию):
+        [иконка] [TAG] НИК GS SCORE ...
+        Якорь: пробел + цифра после ника.
+
+    Стратегия B — RapidOCR/ячеечный формат (каждая ячейка — отдельная строка):
+        [TAG]НИК          ← строка заканчивается на нике, без цифр
+        9640              ← следующая строка — число (GS)
+        Признак: следующая строка является целым числом ≥ 100.
+
+    Обе стратегии применяются одновременно, результаты объединяются.
     Минимальная длина ника после нормализации — 2 символа.
     """
-    _SERVICE = {
-        "gs", "имя", "name", "счёт", "счет", "score",
-        "убийства", "смерти", "помощь", "kills", "deaths", "assists",
-        "kda", "yd", "уп", "yn", "пн",
-        "победа", "поражение", "nopakehme", "nobeda",
-        "victory", "defeat", "win", "lose", "loss",
-        "draw", "ничья", "ctf", "песочница", "sandbox",
-        "team", "команда", "rating", "рейтинг", "place", "место",
-        "all", "total", "necouhmlia", "necoyhula",
-    }
-    candidates = set()
-    for raw_line in ocr_text.splitlines():
-        line = raw_line.strip()
+    candidates: set[str] = set()
+    lines = [ln.strip() for ln in ocr_text.splitlines()]
+
+    for i, line in enumerate(lines):
         if not line:
             continue
+
+        # ── Стратегия A: якорная строка (Tesseract) ──────────────────────────
         m = _PLAYER_LINE_RE.match(line)
-        if not m:
-            continue
-        tok_norm = _normalize(m.group(1))
-        if len(tok_norm) >= 2 and tok_norm not in _SERVICE:
-            candidates.add(tok_norm)
+        if m:
+            tok_norm = _normalize(m.group(1))
+            if len(tok_norm) >= 2 and tok_norm not in _SERVICE_WORDS:
+                candidates.add(tok_norm)
+            continue  # если A сработала — B для этой строки не нужна
+
+        # ── Стратегия B: ячеечный формат (RapidOCR) ──────────────────────────
+        # Строка — просто [TAG]ник без чисел.
+        # Следующая строка должна быть числом (GS ≥ 100 или любое целое ≥ 0).
+        m2 = _CELL_LINE_RE.match(line)
+        if m2:
+            tok_raw = m2.group(1)
+            # Пропускаем строки состоящие только из цифр/точек — это числовые ячейки (GS, score)
+            if re.match(r"^[\d.,/]+$", tok_raw):
+                continue
+            next_line = lines[i + 1] if i + 1 < len(lines) else ""
+            next_is_number = bool(re.match(r"^\d+(\.\d+)?$", next_line))
+            tok_norm = _normalize(tok_raw)
+            if next_is_number and len(tok_norm) >= 2 and tok_norm not in _SERVICE_WORDS:
+                candidates.add(tok_norm)
+
     return list(candidates)
 
 
