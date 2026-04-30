@@ -635,7 +635,7 @@ class VoteButton(discord.ui.Button):
             await interaction.response.send_message("Ты не в этой игре.", ephemeral=True)
             return
 
-        if room["mode"] != "team" and not me["is_captain"]:
+        if room["mode"] not in ("team", "random") and not me["is_captain"]:
             await interaction.response.send_message("Только капитан может голосовать.", ephemeral=True)
             return
 
@@ -1394,11 +1394,6 @@ class Rooms(commands.Cog):
         for p in team2:
             await db.set_player_team(room_id, p["discord_id"], 2)
 
-        cap1 = random.choice(team1)
-        cap2 = random.choice(team2)
-        await db.set_captain(room_id, cap1["discord_id"], True)
-        await db.set_captain(room_id, cap2["discord_id"], True)
-
         await db.update_room_status(room_id, "full")
         await self._refresh_lobby()
 
@@ -1409,8 +1404,8 @@ class Rooms(commands.Cog):
                 title="🎲 Команды сформированы рандомно!",
                 color=0x9B59B6,
             )
-            embed.add_field(name=f"🔵 Команда 1 (капитан: <@{cap1['discord_id']}>)", value=t1_mentions, inline=False)
-            embed.add_field(name=f"🔴 Команда 2 (капитан: <@{cap2['discord_id']}>)", value=t2_mentions, inline=False)
+            embed.add_field(name="🔵 Команда 1", value=t1_mentions, inline=False)
+            embed.add_field(name="🔴 Команда 2", value=t2_mentions, inline=False)
             await channel.send(embed=embed)
             await self._announce_strong_side(channel, room_id)
             await channel.send("✅ Капитаны, нажмите **▶ Start** чтобы начать!")
@@ -2170,7 +2165,7 @@ class Rooms(commands.Cog):
                     await reply_channel.send("Обе команды должны быть полностью заполнены.")
                 return
 
-            if room["mode"] != "team" and not me["is_captain"]:
+            if room["mode"] == "cap" and not me["is_captain"]:
                 if hasattr(reply_channel, "send"):
                     await reply_channel.send("Только капитаны могут запустить игру.")
                 return
@@ -2183,7 +2178,7 @@ class Rooms(commands.Cog):
                 caps = [p for p in players if p["is_captain"]]
                 cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
 
-                if room["mode"] == "team":
+                if room["mode"] in ("team", "random"):
                     screenshot_note = (
                         "📸 **Когда игра закончится** — любой игрок должен прислать скриншот результата в этот канал.\n"
                         "После этого **хотя бы один игрок от каждой команды** нажимает кнопку результата.\n\n"
@@ -2309,7 +2304,7 @@ class Rooms(commands.Cog):
             await ctx.send("Ты не найден в комнате.")
             return
 
-        if room["mode"] != "team" and not me["is_captain"]:
+        if room["mode"] not in ("team", "random") and not me["is_captain"]:
             await ctx.send("Только капитаны могут завершить игру.")
             return
 
@@ -2341,7 +2336,7 @@ class Rooms(commands.Cog):
         team1 = [p for p in players if p["team"] == 1]
         team2 = [p for p in players if p["team"] == 2]
 
-        if mode == "team":
+        if mode in ("team", "random"):
             voter1 = next((p for p in team1 if p["end_vote"]), None)
             voter2 = next((p for p in team2 if p["end_vote"]), None)
             vote1 = voter1["end_vote"] if voter1 else None
@@ -2576,7 +2571,7 @@ class Rooms(commands.Cog):
             _log.info("on_message: sender not in room players — skipping")
             return
 
-        if room["mode"] != "team" and not me["is_captain"]:
+        if room["mode"] not in ("team", "random") and not me["is_captain"]:
             _log.info("on_message: mode=%s and sender is not captain — skipping", room["mode"])
             return
 
@@ -2705,7 +2700,7 @@ class Rooms(commands.Cog):
             if ocr_result.matched_players:
                 matched_info = f"\nRecognized: {', '.join(ocr_result.matched_players)}"
 
-            if room["mode"] == "team":
+            if room["mode"] in ("team", "random"):
                 vote_desc = (
                     f"✅ Screenshot accepted — all {ocr_result.found_count} players found.{matched_info}\n"
                     "⚠️ Could not determine the winner automatically (WIN/LOSS text not found).\n"
@@ -2808,7 +2803,7 @@ class Rooms(commands.Cog):
         caps = [p for p in players if p["is_captain"]]
         cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
 
-        if room["mode"] == "team":
+        if room["mode"] in ("team", "random"):
             vote_desc = (
                 f"Screenshot from {message.author.mention} accepted.\n"
                 "🤖 Could not verify screenshot automatically (OCR unavailable).\n"
