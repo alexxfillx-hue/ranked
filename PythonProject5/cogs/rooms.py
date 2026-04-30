@@ -923,7 +923,7 @@ class Rooms(commands.Cog):
         new_elo: int,
         old_rank: str = None,
     ):
-        """Отправляет публичное поздравление со сменой ранга в канал чата."""
+        """Announces a rank change. Promotion = congrats, demotion = shame message."""
         chat_channel = discord.utils.find(
             lambda c: (
                 getattr(Config, "CHAT_CHANNEL_NAME", None) and Config.CHAT_CHANNEL_NAME in c.name
@@ -933,6 +933,13 @@ class Rooms(commands.Cog):
         if not chat_channel:
             return
 
+        # Determine promotion vs demotion by comparing rank indices
+        from config import RANKS
+        rank_names = [r[2] for r in RANKS]
+        old_idx = rank_names.index(old_rank) if old_rank and old_rank in rank_names else -1
+        new_idx = rank_names.index(new_rank) if new_rank in rank_names else -1
+        is_demotion = old_idx != -1 and new_idx != -1 and new_idx < old_idx
+
         rank_emojis = {
             "Bronze": "🥉", "Silver": "🥈", "Gold": "🥇",
             "Platinum": "💎", "Diamond": "💠", "Master": "👑",
@@ -940,18 +947,31 @@ class Rooms(commands.Cog):
         }
         emoji = next((v for k, v in rank_emojis.items() if k.lower() in new_rank.lower()), "🏆")
 
-        desc_lines = [f"{member.mention} получает новый ранг!\n"]
-        if old_rank:
-            desc_lines.append(f"**{old_rank}** → {emoji} **{new_rank}**")
+        if is_demotion:
+            embed = discord.Embed(
+                title="📉 Rank Lost!",
+                description=(
+                    f"{member.mention} lost rank!\n\n"
+                    f"**{old_rank}** → 💀 **{new_rank}**\n"
+                    f"🔢 {new_elo} ELO\n\n"
+                    f"Are you baby NRT? 👶"
+                ),
+                color=0xED4245,
+            )
         else:
-            desc_lines.append(f"{emoji} **{new_rank}**")
-        desc_lines.append(f"\n🔢 {new_elo} ELO\n\nПоздравляем! / Congratulations! 🎊")
+            desc_lines = [f"{member.mention} has a new rank!\n"]
+            if old_rank:
+                desc_lines.append(f"**{old_rank}** → {emoji} **{new_rank}**")
+            else:
+                desc_lines.append(f"{emoji} **{new_rank}**")
+            desc_lines.append(f"\n🔢 {new_elo} ELO\n\nCongratulations! 🎊")
 
-        embed = discord.Embed(
-            title="🎉 Новый ранг! / New Rank!",
-            description="\n".join(desc_lines),
-            color=0xFFD700,
-        )
+            embed = discord.Embed(
+                title="🎉 New Rank!",
+                description="\n".join(desc_lines),
+                color=0xFFD700,
+            )
+
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.timestamp = discord.utils.utcnow()
         await chat_channel.send(embed=embed)
@@ -2585,6 +2605,16 @@ class Rooms(commands.Cog):
         except ImportError:
             pass
 
+        # Notify players that the bot is analyzing the screenshot
+        analyzing_msg = None
+        if analyze_screenshot is not None:
+            try:
+                analyzing_msg = await message.channel.send(
+                    "🔍 NRT is analyzing the screenshot, please wait..."
+                )
+            except Exception:
+                pass
+
         ocr_result = None
         if analyze_screenshot is not None:
             try:
@@ -2593,6 +2623,13 @@ class Rooms(commands.Cog):
             except Exception as _ocr_err:
                 import logging
                 logging.getLogger("bot").warning("OCR analysis failed: %s", _ocr_err)
+
+        # Delete the "analyzing" message now that OCR is done
+        if analyzing_msg is not None:
+            try:
+                await analyzing_msg.delete()
+            except Exception:
+                pass
 
         # FIX 4: сохраняем URL первого скрина ВСЕГДА (для прикрепления при финализации)
         if image_attachments:
@@ -2604,6 +2641,9 @@ class Rooms(commands.Cog):
             size = room["size"]
             team1_nicks = ", ".join(f"**{p['username']}**" for p in players if p["team"] == 1)
             team2_nicks = ", ".join(f"**{p['username']}**" for p in players if p["team"] == 2)
+
+            caps = [p for p in players if p["is_captain"]]
+            cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
 
             await db.add_screenshot(room_id, my_team, message.author.id)
             await message.add_reaction("❓")
@@ -2621,7 +2661,11 @@ class Rooms(commands.Cog):
                 ),
                 color=0xED4245,
             )
-            await message.channel.send(embed=reject_embed, view=VoteEndView(room_id))
+            await message.channel.send(
+                f"{cap_mentions} — screenshot not accepted, manual vote required.",
+                embed=reject_embed,
+                view=VoteEndView(room_id),
+            )
             return
 
         # ManualVoteNeeded — OCR нашёл игроков, но не определил победителя
