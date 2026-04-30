@@ -208,6 +208,11 @@ _SERVICE_WORDS = {
     "all", "total", "necouhmlia", "necoyhula", "sandboxctf",
 }
 
+# Паттерн системной строки клиента игры (правый нижний угол):
+# "UID:2x2|TYPE:electron|VER:157a95a3|UPD:829|SRV:EU4"
+# Эта строка не из таблицы результатов — фильтруем перед любой обработкой.
+_UID_LINE_RE = re.compile(r"UID:[^|]+\|TYPE:[^|]+\|VER:", re.IGNORECASE)
+
 # Паттерн для «ячеечного» вывода RapidOCR:
 # строка содержит только [TAG]ник (без чисел после), а цифры GS идут следующей строкой.
 # Захватываем: необязательный тег + токен без пробелов.
@@ -241,7 +246,8 @@ def _extract_ocr_names(ocr_text: str) -> list[str]:
     Минимальная длина ника после нормализации — 2 символа.
     """
     candidates: set[str] = set()
-    lines = [ln.strip() for ln in ocr_text.splitlines()]
+    # Фильтруем системные строки клиента (UID:...|TYPE:...|VER:...) — они не из таблицы
+    lines = [ln.strip() for ln in ocr_text.splitlines() if not _UID_LINE_RE.search(ln)]
 
     for i, line in enumerate(lines):
         if not line:
@@ -295,15 +301,6 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str)
     if nick_norm in ocr_candidates:
         return True
 
-    # 1.5. Токен начинается с ника и после ника идут буквы (не цифры) — это UID/системная строка:
-    #   "UID:2x2|TYPE:..." → нормализуется в "uid2x2typeelectron..." → начинается с "2x2"
-    #   Условие "после не цифра" исключает "2x23" (другой ник) vs "2x2typeelectron" (системный мусор)
-    if any(
-        c.startswith(nick_norm) and (len(c) == len(nick_norm) or not c[len(nick_norm)].isdigit())
-        for c in ocr_candidates
-    ):
-        return True
-
     # 2. Ник как отдельное слово в полном тексте (word-boundary через regex)
     #    Используем \b-подобный подход: ник должен быть окружён не-словесными символами
     #    или началом/концом строки.
@@ -328,7 +325,9 @@ def _match_players(ocr_text: str, players: list[dict]) -> list[str]:
     Теги вида [TAG] игнорируются.
     """
     ocr_candidates = _extract_ocr_names(ocr_text)
-    ocr_full_norm  = _normalize(ocr_text)
+    # Фильтруем системные строки перед нормализацией полного текста
+    ocr_text_clean = "\n".join(ln for ln in ocr_text.splitlines() if not _UID_LINE_RE.search(ln))
+    ocr_full_norm  = _normalize(ocr_text_clean)
 
     matched = []
     for p in players:
@@ -823,13 +822,18 @@ def _run_ocr(image_data: bytes, players: "list[dict] | None" = None) -> str:
                 seen_norm.add(norm)
                 all_lines.append(line)
 
-        # Ранний выход: вердикт найден И все ники присутствуют в тексте
+        # Ранний выход: вердикт найден И все ники присутствуют в тексте.
+        # Фильтруем системные UID-строки клиента из проверки: они содержат ники
+        # (UID:2x2|TYPE:...) и ложно триггерят ранний выход, не давая запустить
+        # инвертированный вариант который читает цветной текст таблицы.
         if player_norms:
-            combined_norm = " ".join(seen_norm)
-            combined_upper = "\n".join(all_lines).upper()
+            seen_norm_filtered = {n for n in seen_norm if not _UID_LINE_RE.search(n)}
+            combined_upper = "\n".join(
+                ln for ln in all_lines if not _UID_LINE_RE.search(ln)
+            ).upper()
             has_verdict = any(kw in combined_upper for kw in win_keywords)
             all_found = all(
-                any(pn in cn for cn in seen_norm)
+                any(pn in cn for cn in seen_norm_filtered)
                 for pn in player_norms
             )
             if has_verdict and all_found:
