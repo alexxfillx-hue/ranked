@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import logging
 
 import discord
@@ -32,6 +33,65 @@ COGS = [
     "cogs.leaderboard",
     "cogs.ban",
 ]
+
+# Команды, доступные забаненным игрокам
+_ALLOWED_FOR_BANNED = {"profile", "elo"}
+
+
+# ── Глобальная проверка бана перед каждой командой ────────────────────────────
+
+@bot.before_invoke
+async def global_ban_check(ctx: commands.Context):
+    """
+    Вызывается перед ЛЮБОЙ командой.
+    Если пользователь забанен и команда не в белом списке — блокируем выполнение.
+    Модераторы не блокируются.
+    """
+    # Только в нужном гильде
+    if not ctx.guild or ctx.guild.id != Config.GUILD_ID:
+        return
+
+    # Команды из белого списка пропускаем
+    if ctx.command and ctx.command.name in _ALLOWED_FOR_BANNED:
+        return
+
+    # Модераторов не блокируем
+    if any(r.name == Config.MODERATOR_ROLE_NAME for r in ctx.author.roles):
+        return
+
+    ban_info = await bot.db.get_ban(ctx.author.id)
+    if not ban_info:
+        return
+
+    banned_until: datetime.datetime = ban_info["banned_until"]
+
+    # Бан истёк — снимаем автоматически и пропускаем
+    if datetime.datetime.utcnow() >= banned_until:
+        await bot.db.remove_ban(ctx.author.id)
+        try:
+            banned_role = discord.utils.get(ctx.guild.roles, name="BANNED")
+            if banned_role and banned_role in ctx.author.roles:
+                await ctx.author.remove_roles(banned_role, reason="Ban expired")
+        except discord.Forbidden:
+            pass
+        return
+
+    # Бан активен — отправляем сообщение и отменяем команду
+    until_str = banned_until.strftime("%d.%m.%Y %H:%M UTC")
+    embed = discord.Embed(
+        title="🚫  Вы заблокированы",
+        color=0xFF0000,
+        description=(
+            f"Вы не можете пользоваться командами бота.\n"
+            f"**Бан истекает:** {until_str}\n\n"
+            f"Доступно: `!profile`"
+        ),
+    )
+    await ctx.send(embed=embed)
+    raise commands.CommandError("User is banned")  # прерывает выполнение команды
+
+
+# ───────────────────────────────────────────────────────────────────────────────
 
 
 async def _register_persistent_views():
@@ -105,6 +165,8 @@ async def on_command_error(ctx: commands.Context, error):
         await ctx.send("⚠️ Неверный тип аргумента.")
     elif isinstance(error, commands.CommandNotFound):
         pass
+    elif isinstance(error, commands.CommandError) and str(error) == "User is banned":
+        pass  # уже обработано в global_ban_check
     else:
         log.exception(f"Command error in {ctx.command}", exc_info=error)
 
