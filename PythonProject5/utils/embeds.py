@@ -209,8 +209,7 @@ def profile_embed(player, member: discord.Member, ban_info=None) -> discord.Embe
             remaining_str = "истекает"
         embed.add_field(
             name="🔨 BANNED",
-            value=f"До: **{until_str}**
-Осталось: {remaining_str}",
+            value=f"До: **{until_str}**\nОсталось: {remaining_str}",
             inline=False,
         )
     return embed
