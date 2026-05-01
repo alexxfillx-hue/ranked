@@ -154,16 +154,21 @@ def room_embed(room_id: int, size: int, players, mode: str = "team") -> discord.
     return embed
 
 
-def profile_embed(player, member: discord.Member) -> discord.Embed:
+def profile_embed(player, member: discord.Member, ban_info=None) -> discord.Embed:
     rank_name, color = get_rank(player["elo"])
     total = player["wins"] + player["losses"] + player["draws"]
     decisive = player["wins"] + player["losses"]
     wr = round(player["wins"] / decisive * 100, 1) if decisive else 0
     streak = player["win_streak"]
 
+    # Если игрок забанен — красный цвет и заголовок
+    is_banned = ban_info is not None
+    embed_color = 0xFF0000 if is_banned else color
+    title_prefix = "🔨  " if is_banned else "📋  "
+
     embed = discord.Embed(
-        title=f"📋  {member.display_name}",
-        color=color,
+        title=f"{title_prefix}{member.display_name}",
+        color=embed_color,
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="🏆 Rank", value=rank_name, inline=True)
@@ -180,5 +185,32 @@ def profile_embed(player, member: discord.Member) -> discord.Embed:
     if player["penalty_games"]:
         embed.add_field(
             name="⚠️ Penalty", value=f"{player['penalty_games']} games left", inline=True
+        )
+    if is_banned and ban_info:
+        import datetime
+        banned_until = ban_info["banned_until"]
+        until_str = banned_until.strftime("%d.%m.%Y %H:%M UTC")
+        # Оставшееся время
+        remaining = banned_until - datetime.datetime.utcnow()
+        total_secs = int(remaining.total_seconds())
+        if total_secs > 0:
+            days = total_secs // 86400
+            hours = (total_secs % 86400) // 3600
+            mins = (total_secs % 3600) // 60
+            parts = []
+            if days:
+                parts.append(f"{days}д")
+            if hours:
+                parts.append(f"{hours}ч")
+            if mins or not parts:
+                parts.append(f"{mins}м")
+            remaining_str = " ".join(parts)
+        else:
+            remaining_str = "истекает"
+        embed.add_field(
+            name="🔨 BANNED",
+            value=f"До: **{until_str}**
+Осталось: {remaining_str}",
+            inline=False,
         )
     return embed
