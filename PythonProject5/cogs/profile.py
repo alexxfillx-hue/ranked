@@ -37,7 +37,8 @@ class Profile(commands.Cog):
             )
             return
 
-        embed = profile_embed(player, target)
+        ban_info = await self.bot.db.get_ban(target.id)
+        embed = profile_embed(player, target, ban_info=ban_info)
         await ctx.send(embed=embed)
 
     @commands.command(name="elo")
