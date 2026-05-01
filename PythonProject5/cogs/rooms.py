@@ -49,6 +49,12 @@ class CreateRoomButton(discord.ui.Button):
             await interaction.response.send_message("Ошибка: cog не найден.", ephemeral=True)
             return
 
+        if self.size == 1 and self.mode != "team":
+            await interaction.response.send_message(
+                "❌ 1v1 only supports **team** mode.", ephemeral=True
+            )
+            return
+
         db = interaction.client.db
         player = await db.get_player(interaction.user.id)
         if not player:
@@ -1116,6 +1122,10 @@ class Rooms(commands.Cog):
 
         if mode not in ("team", "random", "cap"):
             await ctx.send("Укажи режим: `team`, `random` или `cap`.")
+            return
+
+        if size == 1 and mode != "team":
+            await ctx.send("❌ 1v1 only supports **team** mode.")
             return
 
         db = self.bot.db
@@ -2466,13 +2476,13 @@ class Rooms(commands.Cog):
             await channel.send(embed=embed)
 
         if v1 == "draw":
-            winner_label = "🤝 Ничья!"
+            winner_label = "🤝 Draw!"
             winner_color = 0x95A5A6
         elif v1 == "win":
-            winner_label = "🔵 Победила **Команда 1**!"
+            winner_label = "🔵 **Team 1** wins!"
             winner_color = 0x3498DB
         else:
-            winner_label = "🔴 Победила **Команда 2**!"
+            winner_label = "🔴 **Team 2** wins!"
             winner_color = 0xE74C3C
 
         def team_lines(team_list):
@@ -2488,16 +2498,16 @@ class Rooms(commands.Cog):
                     )
             return "\n".join(lines) if lines else "—"
 
-        mode_labels_r = {"team": "👥 Командный", "random": "🎲 Рандомный", "cap": "🎯 Капитанский"}
+        mode_labels_r = {"team": "👥 Team", "random": "🎲 Random", "cap": "🎯 Captain"}
         mode_label_r = mode_labels_r.get(room["mode"], "")
 
         results_embed = discord.Embed(
-            title=f"📋 Матч #{room_id}  ·  {room['size']}v{room['size']}  ·  {mode_label_r}  ·  {winner_label}",
+            title=f"📋 Match #{room_id}  ·  {room['size']}v{room['size']}  ·  {mode_label_r}  ·  {winner_label}",
             color=winner_color,
         )
-        results_embed.add_field(name="🔵 Команда 1", value=team_lines(team1), inline=False)
-        results_embed.add_field(name="🔴 Команда 2", value=team_lines(team2), inline=False)
-        results_embed.set_footer(text="Матч завершён")
+        results_embed.add_field(name="🔵 Team 1", value=team_lines(team1), inline=False)
+        results_embed.add_field(name="🔴 Team 2", value=team_lines(team2), inline=False)
+        results_embed.set_footer(text="Match completed")
         results_embed.timestamp = discord.utils.utcnow()
 
         screenshots = await db.get_screenshots(room_id)
@@ -2529,7 +2539,7 @@ class Rooms(commands.Cog):
         # FIX 4: прикрепляем скриншот к результатам матча
         if screenshots and first_screenshot_url:
             await results_channel.send(
-                f"📸 Скриншот матча **#{room_id}** · {first_screenshot_url}"
+                f"📸 Match screenshot **#{room_id}** · {first_screenshot_url}"
             )
 
         if channel:
@@ -3185,16 +3195,16 @@ class Rooms(commands.Cog):
 
         from config import get_rank as _get_rank
         if new_winner_team == 0:
-            winner_label = "🤝 Ничья!"
+            winner_label = "🤝 Draw!"
             winner_color = 0x95A5A6
         elif new_winner_team == 1:
-            winner_label = "🔵 Победила **Команда 1**!"
+            winner_label = "🔵 **Team 1** wins!"
             winner_color = 0x3498DB
         else:
-            winner_label = "🔴 Победила **Команда 2**!"
+            winner_label = "🔴 **Team 2** wins!"
             winner_color = 0xE74C3C
 
-        mode_labels_r = {"team": "👥 Командный", "random": "🎲 Рандомный", "cap": "🎯 Капитанский"}
+        mode_labels_r = {"team": "👥 Team", "random": "🎲 Random", "cap": "🎯 Captain"}
         mode_label_r = mode_labels_r.get(match_row["mode"] or "", "")
 
         gr_rows = await db.pool.fetch(
@@ -3228,12 +3238,12 @@ class Rooms(commands.Cog):
         t2_text = "\n".join(player_switch_line(pid) for pid in team2_ids) or "—"
 
         new_embed = discord.Embed(
-            title=f"📋 Матч #{game_id}  ·  {match_row['size']}v{match_row['size']}  ·  {mode_label_r}  ·  {winner_label}",
+            title=f"📋 Match #{game_id}  ·  {match_row['size']}v{match_row['size']}  ·  {mode_label_r}  ·  {winner_label}",
             color=winner_color,
         )
-        new_embed.add_field(name="🔵 Команда 1", value=t1_text, inline=False)
-        new_embed.add_field(name="🔴 Команда 2", value=t2_text, inline=False)
-        new_embed.set_footer(text="Матч завершён · результат исправлен модератором")
+        new_embed.add_field(name="🔵 Team 1", value=t1_text, inline=False)
+        new_embed.add_field(name="🔴 Team 2", value=t2_text, inline=False)
+        new_embed.set_footer(text="Match completed · result changed by moderator")
         new_embed.timestamp = discord.utils.utcnow()
 
         results_channel = guild.get_channel(match_row["result_channel_id"])
@@ -3248,8 +3258,8 @@ class Rooms(commands.Cog):
         )
 
         await ctx.send(
-            f"✅ Результат матча **#{game_id}** исправлен. "
-            f"{'🔵 Команда 1' if new_winner_team == 1 else '🔴 Команда 2' if new_winner_team == 2 else '🤝 Ничья'} теперь победитель."
+            f"✅ Match **#{game_id}** result updated. "
+            f"{'🔵 Team 1' if new_winner_team == 1 else '🔴 Team 2' if new_winner_team == 2 else '🤝 Draw'} is now the winner."
         )
 
     @commands.command(name="cancel")
@@ -3327,11 +3337,11 @@ class Rooms(commands.Cog):
             )
 
         embed = discord.Embed(
-            title=f"🗑️ Матч #{game_id} отменён",
-            description="\n".join(lines) if lines else "Нет данных об игроках.",
+            title=f"🗑️ Match #{game_id} cancelled",
+            description="\n".join(lines) if lines else "No player data.",
             color=0xED4245,
         )
-        embed.set_footer(text=f"Отменил: {ctx.author.display_name}")
+        embed.set_footer(text=f"Cancelled by: {ctx.author.display_name}")
         embed.timestamp = discord.utils.utcnow()
         await ctx.send(embed=embed)
 
