@@ -109,6 +109,14 @@ CREATE TABLE IF NOT EXISTS teammate_results (
 );
 CREATE INDEX IF NOT EXISTS idx_teammate_discord ON teammate_results(discord_id);
 CREATE INDEX IF NOT EXISTS idx_teammate_teammate ON teammate_results(teammate_id);
+
+CREATE TABLE IF NOT EXISTS bans (
+    discord_id   BIGINT    PRIMARY KEY REFERENCES players(discord_id),
+    banned_until TIMESTAMP NOT NULL,
+    banned_by    BIGINT    NOT NULL,
+    duration_raw TEXT      NOT NULL,
+    created_at   TIMESTAMP DEFAULT NOW()
+);
 """
 
 
@@ -192,6 +200,15 @@ class Database:
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_teammate_teammate ON teammate_results(teammate_id)"
+            )
+            await conn.execute(
+                """CREATE TABLE IF NOT EXISTS bans (
+                    discord_id   BIGINT    PRIMARY KEY REFERENCES players(discord_id),
+                    banned_until TIMESTAMP NOT NULL,
+                    banned_by    BIGINT    NOT NULL,
+                    duration_raw TEXT      NOT NULL,
+                    created_at   TIMESTAMP DEFAULT NOW()
+                )"""
             )
 
     @property
@@ -307,6 +324,37 @@ class Database:
         await self.pool.execute(
             "UPDATE players SET penalty_games=penalty_games+3 WHERE discord_id=$1",
             discord_id,
+        )
+
+    # ──────────────────────── Bans ────────────────────────
+
+    async def set_ban(
+        self,
+        discord_id: int,
+        banned_until: datetime.datetime,
+        banned_by: int,
+        duration_raw: str,
+    ):
+        """Устанавливает или обновляет бан игрока."""
+        await self.pool.execute(
+            """INSERT INTO bans (discord_id, banned_until, banned_by, duration_raw)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (discord_id) DO UPDATE
+               SET banned_until=$2, banned_by=$3, duration_raw=$4, created_at=NOW()""",
+            discord_id, banned_until, banned_by, duration_raw,
+        )
+
+    async def get_ban(self, discord_id: int) -> "_Row | None":
+        """Возвращает запись бана или None если игрок не забанен."""
+        r = await self.pool.fetchrow(
+            "SELECT * FROM bans WHERE discord_id=$1", discord_id
+        )
+        return _row(r)
+
+    async def remove_ban(self, discord_id: int):
+        """Снимает бан игрока."""
+        await self.pool.execute(
+            "DELETE FROM bans WHERE discord_id=$1", discord_id
         )
 
     async def get_elo_history(
