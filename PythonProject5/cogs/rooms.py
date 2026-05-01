@@ -267,7 +267,7 @@ class LeaveWarningView(discord.ui.View):
         super().__init__(timeout=30)
         self.room_id = room_id
 
-    @discord.ui.button(label="✅ Подтвердить выход (-15 ELO)", style=discord.ButtonStyle.danger, custom_id="leave_confirm")
+    @discord.ui.button(label="✅ Confirm leave (-15 ELO)", style=discord.ButtonStyle.danger, custom_id="leave_confirm")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.stop()
         bot = interaction.client
@@ -312,7 +312,7 @@ class LeaveWarningView(discord.ui.View):
 
         if not players:
             await interaction.response.edit_message(
-                content="✅ Ты покинул комнату. Она удалена (все ушли). **-15 ELO** штраф применён.", view=None, embed=None
+                content="✅ You left the room. It has been deleted (everyone left). **-15 ELO** penalty applied.", view=None, embed=None
             )
             if channel:
                 await channel.delete(reason="Комната пуста")
@@ -321,36 +321,42 @@ class LeaveWarningView(discord.ui.View):
                 await rooms_cog._refresh_lobby()
             return
 
-        if was_captain and my_team and rooms_cog:
-            team_left = [p for p in players if p["team"] == my_team]
-            if team_left:
-                new_cap = max(team_left, key=lambda p: p["elo"])
-                await db.set_captain(self.room_id, new_cap["discord_id"], True)
-                if channel:
-                    m = guild.get_member(new_cap["discord_id"])
-                    if m:
-                        await channel.send(f"👑 {m.mention} назначен новым капитаном команды {my_team}.")
+        # В cap-режиме во время пика — полный сброс капитанов
+        room_fresh = await db.get_room(self.room_id)
+        if (room_fresh and room_fresh["mode"] == "cap"
+                and room_fresh["status"] in ("picking", "full") and rooms_cog):
+            await rooms_cog._reset_cap_picking(self.room_id, channel, guild)
+        else:
+            if was_captain and my_team and rooms_cog:
+                team_left = [p for p in players if p["team"] == my_team]
+                if team_left:
+                    new_cap = max(team_left, key=lambda p: p["elo"])
+                    await db.set_captain(self.room_id, new_cap["discord_id"], True)
+                    if channel:
+                        m = guild.get_member(new_cap["discord_id"])
+                        if m:
+                            await channel.send(f"👑 {m.mention} назначен новым капитаном команды {my_team}.")
 
-        await db.update_room_status(self.room_id, "waiting")
-        await db.set_ready(self.room_id, 1, False)
-        await db.set_ready(self.room_id, 2, False)
-        for p in players:
-            await db.set_end_vote(self.room_id, p["discord_id"], None)
+            await db.update_room_status(self.room_id, "waiting")
+            await db.set_ready(self.room_id, 1, False)
+            await db.set_ready(self.room_id, 2, False)
+            for p in players:
+                await db.set_end_vote(self.room_id, p["discord_id"], None)
 
         if rooms_cog:
             await rooms_cog._refresh_room_embed(self.room_id)
             await rooms_cog._refresh_lobby()
 
         await interaction.response.edit_message(
-            content="✅ Ты покинул комнату. **-15 ELO** штраф применён.", view=None, embed=None
+            content="✅ You left the room. **-15 ELO** penalty applied.", view=None, embed=None
         )
 
-    @discord.ui.button(label="❌ Отмена", style=discord.ButtonStyle.secondary, custom_id="leave_cancel")
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary, custom_id="leave_cancel")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.stop()
-        await interaction.response.edit_message(content="✅ Выход отменён. Ты остаёшься в игре.", view=None, embed=None)
+        await interaction.response.edit_message(content="✅ Cancelled. You remain in the game.", view=None, embed=None)
 
-    @discord.ui.button(label="🚨 Вызвать админа", style=discord.ButtonStyle.danger, custom_id="leave_call_admin")
+    @discord.ui.button(label="🚨 Call Admin", style=discord.ButtonStyle.danger, custom_id="leave_call_admin")
     async def call_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.stop()
         bot = interaction.client
@@ -362,13 +368,13 @@ class LeaveWarningView(discord.ui.View):
         if admin_channel:
             mod_role = discord.utils.get(guild.roles, name=Config.MODERATOR_ROLE_NAME)
             mention = mod_role.mention if mod_role else "@Модератор"
-            embed = discord.Embed(title="🚨 Игрок хочет покинуть активную игру", color=0xED4245)
+            embed = discord.Embed(title="🚨 Player wants to leave an active game", color=0xED4245)
             embed.add_field(name="Игрок", value=f"{interaction.user.mention} (`{interaction.user}`)", inline=True)
             embed.add_field(name="Комната", value=f"**#{self.room_id}** {interaction.channel.mention}", inline=True)
             await admin_channel.send(f"{mention}", embed=embed)
 
         await interaction.response.edit_message(
-            content="✅ Администрация уведомлена. Ты остаёшься в игре до решения модератора.",
+            content="✅ Admins have been notified. You remain in the game until the moderator decides.",
             view=None, embed=None,
         )
 
@@ -397,15 +403,15 @@ class ExitButton(discord.ui.Button):
 
         if room["status"] == "started":
             embed = discord.Embed(
-                title="⚠️ Внимание! Выход из активной игры",
+                title="⚠️ Warning! Leaving an active game",
                 description=(
-                    "Ты собираешься покинуть **активную игру**.\n\n"
-                    "**Последствия выхода:**\n"
-                    "• `-15 ELO` будет немедленно списано\n"
-                    "• Игра для всех участников будет отменена\n"
-                    "• Комната перейдёт в режим набора игроков\n\n"
-                    "Если у тебя проблемы — вызови администратора. "
-                    "Модератор может решить ситуацию без штрафа."
+                    "You are about to leave an **active game**.\n\n"
+                    "**Consequences:**\n"
+                    "• `-15 ELO` will be deducted immediately\n"
+                    "• The game will be cancelled for all players\n"
+                    "• The room will return to waiting for players\n\n"
+                    "If you have an issue — call an admin using the 🚨 button. "
+                    "A moderator can resolve it without a penalty."
                 ),
                 color=0xED4245,
             )
@@ -508,6 +514,11 @@ class StartButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        # Удаляем сообщение с кнопкой сразу после нажатия
+        try:
+            await interaction.message.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
         rooms_cog = interaction.client.cogs.get("Rooms")
         if rooms_cog:
             await rooms_cog._do_start(interaction.user, interaction.channel, self.room_id)
@@ -1426,6 +1437,43 @@ class Rooms(commands.Cog):
 
     # ── Cap mode ─────────────────────────────────────────────────
 
+    async def _reset_cap_picking(self, room_id: int, channel, guild):
+        """
+        Сбрасывает пик в cap-режиме: снимает капитанов, переводит всех в team=0,
+        ставит статус waiting, чистит pick-сообщения.
+        Когда комната снова заполнится — _start_captain_pick предложит выбрать капитанов заново.
+        """
+        db = self.bot.db
+        players = await db.get_room_players(room_id)
+
+        # Снимаем капитанов и сбрасываем команды
+        for p in players:
+            if p["is_captain"]:
+                await db.set_captain(room_id, p["discord_id"], False)
+            await db.set_player_team(room_id, p["discord_id"], 0)
+
+        # Удаляем висящее pick-сообщение с кнопками
+        old_msg_id = self._pick_message_ids.pop(room_id, None)
+        if old_msg_id and channel:
+            try:
+                old_msg = await channel.fetch_message(old_msg_id)
+                await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        await db.update_room_status(room_id, "waiting")
+        await db.set_ready(room_id, 1, False)
+        await db.set_ready(room_id, 2, False)
+        for p in players:
+            await db.set_end_vote(room_id, p["discord_id"], None)
+
+        if channel:
+            await channel.send(
+                "⚠️ A player left during captain pick. "
+                "All captains have been reset. "
+                "Waiting for a new player — once the room is full, captains will be selected again."
+            )
+
     async def _start_captain_pick(self, room_id: int, players: list, size: int, channel):
         db = self.bot.db
         await db.update_room_status(room_id, "full")
@@ -1647,6 +1695,16 @@ class Rooms(commands.Cog):
         total_slots = room["size"] * 2
         if len(players) < total_slots:
             await ctx.send(f"❌ Комната ещё не заполнена ({len(players)}/{total_slots}).")
+            return
+
+        # Block !random if two captains are already assigned
+        existing_caps = [p for p in players if p["is_captain"]]
+        if len(existing_caps) >= 2:
+            cap_mentions = " and ".join(f"<@{p['discord_id']}>" for p in existing_caps[:2])
+            await ctx.send(
+                f"❌ Two captains are already set ({cap_mentions}). "
+                f"They must use `!uncap` first before `!random` can be used again."
+            )
             return
 
         if room["status"] == "picking":
@@ -1902,15 +1960,15 @@ class Rooms(commands.Cog):
 
         if game_was_started:
             embed = discord.Embed(
-                title="⚠️ Внимание! Выход из активной игры",
+                title="⚠️ Warning! Leaving an active game",
                 description=(
-                    "Ты собираешься покинуть **активную игру**.\n\n"
-                    "**Последствия выхода:**\n"
-                    "• `-15 ELO` будет немедленно списано\n"
-                    "• Игра для всех участников будет отменена\n"
-                    "• Комната перейдёт в режим набора игроков\n\n"
-                    "Если у тебя проблемы — вызови администратора через кнопку 🚨 в комнате. "
-                    "Модератор может решить ситуацию без штрафа."
+                    "You are about to leave an **active game**.\n\n"
+                    "**Consequences:**\n"
+                    "• `-15 ELO` will be deducted immediately\n"
+                    "• The game will be cancelled for all players\n"
+                    "• The room will return to waiting for players\n\n"
+                    "If you have an issue — use the 🚨 button in the room. "
+                    "A moderator can resolve it without a penalty."
                 ),
                 color=0xED4245,
             )
@@ -1937,24 +1995,28 @@ class Rooms(commands.Cog):
             await self._refresh_lobby()
             return
 
-        if was_captain and my_team:
-            team_left = [p for p in players if p["team"] == my_team]
-            if team_left:
-                new_cap = max(team_left, key=lambda p: p["elo"])
-                await db.set_captain(room["room_id"], new_cap["discord_id"], True)
-                if channel:
-                    new_cap_member = guild.get_member(new_cap["discord_id"])
-                    if new_cap_member:
-                        await channel.send(
-                            f"👑 {new_cap_member.mention} назначен новым капитаном команды {my_team}."
-                        )
+        # В cap-режиме во время пика — полный сброс капитанов
+        if room["mode"] == "cap" and room["status"] in ("picking", "full"):
+            await self._reset_cap_picking(room["room_id"], channel, guild)
+        else:
+            if was_captain and my_team:
+                team_left = [p for p in players if p["team"] == my_team]
+                if team_left:
+                    new_cap = max(team_left, key=lambda p: p["elo"])
+                    await db.set_captain(room["room_id"], new_cap["discord_id"], True)
+                    if channel:
+                        new_cap_member = guild.get_member(new_cap["discord_id"])
+                        if new_cap_member:
+                            await channel.send(
+                                f"👑 {new_cap_member.mention} назначен новым капитаном команды {my_team}."
+                            )
 
-        if room["status"] in ("full", "picking", "started"):
-            await db.update_room_status(room["room_id"], "waiting")
-            await db.set_ready(room["room_id"], 1, False)
-            await db.set_ready(room["room_id"], 2, False)
-            for p in players:
-                await db.set_end_vote(room["room_id"], p["discord_id"], None)
+            if room["status"] in ("full", "picking", "started"):
+                await db.update_room_status(room["room_id"], "waiting")
+                await db.set_ready(room["room_id"], 1, False)
+                await db.set_ready(room["room_id"], 2, False)
+                for p in players:
+                    await db.set_end_vote(room["room_id"], p["discord_id"], None)
 
         await self._refresh_room_embed(room["room_id"])
         await ctx.send(
@@ -2044,6 +2106,9 @@ class Rooms(commands.Cog):
                     "⏸️ Игра приостановлена из-за кика игрока. "
                     "Ожидается замена или используйте `!mod_end` чтобы расформировать."
                 )
+        elif room["mode"] == "cap" and room["status"] in ("full", "picking"):
+            # В cap-режиме во время пика — полный сброс капитанов
+            await self._reset_cap_picking(room["room_id"], channel, ctx.guild)
         elif room["status"] in ("full", "picking"):
             await db.update_room_status(room["room_id"], "waiting")
             await db.set_ready(room["room_id"], 1, False)
