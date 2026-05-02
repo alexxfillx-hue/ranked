@@ -229,29 +229,43 @@ class Database:
                   )
                 """
             )
-            # Миграция: пересчитываем wins/losses/draws/games_played из game_results.
-            # game_results содержит по N строк на матч (player vs each opponent),
-            # поэтому считаем DISTINCT game_id чтобы получить 1 матч = 1 запись.
+            # Одноразовая миграция: пересчитываем wins/losses/draws/games_played.
+            # Выполняется только если таблица-флаг ещё не содержит эту запись.
             await conn.execute(
                 """
-                UPDATE players p
-                SET
-                    wins         = s.wins,
-                    losses       = s.losses,
-                    draws        = s.draws,
-                    games_played = s.wins + s.losses + s.draws
-                FROM (
-                    SELECT
-                        discord_id,
-                        COUNT(DISTINCT game_id) FILTER (WHERE result = 'win')  AS wins,
-                        COUNT(DISTINCT game_id) FILTER (WHERE result = 'lose') AS losses,
-                        COUNT(DISTINCT game_id) FILTER (WHERE result = 'draw') AS draws
-                    FROM game_results
-                    GROUP BY discord_id
-                ) s
-                WHERE p.discord_id = s.discord_id
+                CREATE TABLE IF NOT EXISTS _migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TIMESTAMP DEFAULT NOW()
+                )
                 """
             )
+            already = await conn.fetchval(
+                "SELECT 1 FROM _migrations WHERE name = 'recalc_wins_from_game_results'"
+            )
+            if not already:
+                await conn.execute(
+                    """
+                    UPDATE players p
+                    SET
+                        wins         = s.wins,
+                        losses       = s.losses,
+                        draws        = s.draws,
+                        games_played = s.wins + s.losses + s.draws
+                    FROM (
+                        SELECT
+                            discord_id,
+                            COUNT(DISTINCT game_id) FILTER (WHERE result = 'win')  AS wins,
+                            COUNT(DISTINCT game_id) FILTER (WHERE result = 'lose') AS losses,
+                            COUNT(DISTINCT game_id) FILTER (WHERE result = 'draw') AS draws
+                        FROM game_results
+                        GROUP BY discord_id
+                    ) s
+                    WHERE p.discord_id = s.discord_id
+                    """
+                )
+                await conn.execute(
+                    "INSERT INTO _migrations (name) VALUES ('recalc_wins_from_game_results')"
+                )
 
     @property
     def pool(self) -> asyncpg.Pool:
