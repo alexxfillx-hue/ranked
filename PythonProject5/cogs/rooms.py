@@ -2188,6 +2188,7 @@ class Rooms(commands.Cog):
                 await db.set_ready(room["room_id"], 2, False)
                 for p in players:
                     await db.set_end_vote(room["room_id"], p["discord_id"], None)
+                await self._delete_match_status(room["room_id"], guild)
 
         await self._refresh_room_embed(room["room_id"])
         await ctx.send(
