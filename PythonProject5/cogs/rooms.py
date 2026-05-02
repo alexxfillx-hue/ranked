@@ -890,17 +890,20 @@ class Rooms(commands.Cog):
         if not msg_id:
             return
         try:
-            results_channel = discord.utils.get(guild.text_channels, name=Config.RESULTS_CHANNEL_NAME)
-            if results_channel:
-                msg = await results_channel.fetch_message(msg_id)
+            lobby_channel = discord.utils.find(
+                lambda c: Config.LOBBY_CHANNEL_NAME in c.name or c.name == Config.LOBBY_CHANNEL_NAME,
+                guild.text_channels,
+            )
+            if lobby_channel:
+                msg = await lobby_channel.fetch_message(msg_id)
                 await msg.delete()
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
     async def _post_or_update_match_status(self, room_id: int):
         """
-        Posts or edits a live status embed in the match-results channel.
-        Shows current stage once the room is full/picking/started.
+        Posts or edits a simple matchup message in the search-game (lobby) channel.
+        Shows who is playing against whom once the game has started.
         Automatically deleted when the room finishes.
         """
         try:
@@ -914,7 +917,8 @@ class Rooms(commands.Cog):
                 return
 
             status = room["status"]
-            if status == "waiting":
+            # Only show when the game is actually in progress
+            if status != "started":
                 return
 
             players = await db.get_room_players(room_id)
@@ -926,101 +930,35 @@ class Rooms(commands.Cog):
 
             team1 = [p for p in players if p["team"] == 1]
             team2 = [p for p in players if p["team"] == 2]
-            caps = [p for p in players if p["is_captain"]]
-            cap1 = next((p for p in caps if p["team"] == 1), None)
-            cap2 = next((p for p in caps if p["team"] == 2), None)
 
-            def fmt_team(team_list):
-                lines = []
-                for p in team_list:
-                    prefix = "👑 " if p["is_captain"] else "• "
-                    lines.append(f"{prefix}**{p['username']}** — {p['elo']} ELO")
-                return "\n".join(lines) if lines else "—"
+            t1_names = " · ".join(f"**{p['username']}**" for p in team1) or "—"
+            t2_names = " · ".join(f"**{p['username']}**" for p in team2) or "—"
 
-            if mode == "cap":
-                if status == "full" and not (cap1 and cap2):
-                    embed = discord.Embed(
-                        title=f"🎮 Match #{room_id}  ·  {size}v{size}  ·  {mode_label}",
-                        color=0xE67E22,
-                    )
-                    embed.add_field(
-                        name="📋 Stage 1/3 — Choosing captains",
-                        value="Players are selecting captains (`!cap` / `!random`)",
-                        inline=False,
-                    )
-                    all_names = "\n".join(f"• **{p['username']}** — {p['elo']} ELO" for p in players)
-                    embed.add_field(name="Players", value=all_names, inline=False)
-
-                elif status in ("full", "picking") and cap1 and cap2:
-                    embed = discord.Embed(
-                        title=f"🎮 Match #{room_id}  ·  {size}v{size}  ·  {mode_label}",
-                        color=0x3498DB,
-                    )
-                    embed.add_field(
-                        name="📋 Stage 2/3 — Captains picking players",
-                        value=(
-                            f"🔵 Captain Team 1: **{cap1['username']}**\n"
-                            f"🔴 Captain Team 2: **{cap2['username']}**"
-                        ),
-                        inline=False,
-                    )
-                    if team1:
-                        embed.add_field(name="🔵 Team 1", value=fmt_team(team1), inline=True)
-                    if team2:
-                        embed.add_field(name="🔴 Team 2", value=fmt_team(team2), inline=True)
-
-                elif status == "started":
-                    embed = discord.Embed(
-                        title=f"🎮 Match #{room_id}  ·  {size}v{size}  ·  {mode_label}",
-                        color=0x57F287,
-                    )
-                    embed.add_field(name="🚀 Game in progress", value="The match has started!", inline=False)
-                    embed.add_field(name="🔵 Team 1", value=fmt_team(team1), inline=True)
-                    embed.add_field(name="🔴 Team 2", value=fmt_team(team2), inline=True)
-                else:
-                    return
-
-            else:
-                # team / random
-                if status in ("full", "picking"):
-                    embed = discord.Embed(
-                        title=f"🎮 Match #{room_id}  ·  {size}v{size}  ·  {mode_label}",
-                        color=0xE67E22,
-                    )
-                    embed.add_field(
-                        name="📋 Teams formed — waiting to start",
-                        value="Captains must press ▶ Start",
-                        inline=False,
-                    )
-                    embed.add_field(name="🔵 Team 1", value=fmt_team(team1), inline=True)
-                    embed.add_field(name="🔴 Team 2", value=fmt_team(team2), inline=True)
-
-                elif status == "started":
-                    embed = discord.Embed(
-                        title=f"🎮 Match #{room_id}  ·  {size}v{size}  ·  {mode_label}",
-                        color=0x57F287,
-                    )
-                    embed.add_field(name="🚀 Game in progress", value="The match has started!", inline=False)
-                    embed.add_field(name="🔵 Team 1", value=fmt_team(team1), inline=True)
-                    embed.add_field(name="🔴 Team 2", value=fmt_team(team2), inline=True)
-                else:
-                    return
-
-            embed.set_footer(text=f"Room #{room_id}  ·  {size}v{size}  ·  {mode_label}")
+            embed = discord.Embed(
+                title=f"⚔️  Match #{room_id}  ·  {size}v{size}  ·  {mode_label}",
+                description=f"🔵 {t1_names}\n🆚\n🔴 {t2_names}",
+                color=0x57F287,
+            )
             embed.timestamp = discord.utils.utcnow()
 
-            results_channel = await self._get_or_create_results_channel(guild)
+            lobby_channel = discord.utils.find(
+                lambda c: Config.LOBBY_CHANNEL_NAME in c.name or c.name == Config.LOBBY_CHANNEL_NAME,
+                guild.text_channels,
+            )
+            if not lobby_channel:
+                return
+
             existing_msg_id = self._status_message_ids.get(room_id)
 
             if existing_msg_id:
                 try:
-                    existing_msg = await results_channel.fetch_message(existing_msg_id)
+                    existing_msg = await lobby_channel.fetch_message(existing_msg_id)
                     await existing_msg.edit(embed=embed)
                     return
                 except (discord.NotFound, discord.HTTPException):
                     self._status_message_ids.pop(room_id, None)
 
-            new_msg = await results_channel.send(embed=embed)
+            new_msg = await lobby_channel.send(embed=embed)
             self._status_message_ids[room_id] = new_msg.id
 
         except Exception as e:
