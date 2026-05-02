@@ -32,6 +32,7 @@ COGS = [
     "cogs.profile",
     "cogs.leaderboard",
     "cogs.ban",
+    "cogs.bets",
 ]
 
 # Команды, доступные забаненным игрокам
