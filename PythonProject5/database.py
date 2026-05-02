@@ -413,6 +413,14 @@ class Database:
             "DELETE FROM bans WHERE discord_id=$1", discord_id
         )
 
+    async def get_expired_bans(self) -> list["_Row"]:
+        """Возвращает все баны у которых истёк срок."""
+        rows = await self.pool.fetch(
+            "SELECT * FROM bans WHERE banned_until <= $1",
+            datetime.datetime.utcnow(),
+        )
+        return _rows(rows)
+
     async def get_elo_history(
         self, discord_id: int, since: datetime.datetime | None
     ) -> list[_Row]:
