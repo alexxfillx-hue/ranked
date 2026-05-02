@@ -335,7 +335,9 @@ class Leaderboard(commands.Cog):
             await ctx.send(f"{target.mention} is not registered.")
             return
         history = await self.bot.db.get_elo_history_simple(target.id)
-        game_history = [r for r in history if r.get("game_id") is not None]
+        # Разделяем: ставки (is_bet=True) и обычные игры
+        game_history = [r for r in history if r.get("game_id") is not None and not r.get("is_bet")]
+        bet_history  = [r for r in history if r.get("is_bet")]
         if not game_history:
             await ctx.send(f"**{player['username']}** has no games played yet.")
             return
@@ -366,6 +368,7 @@ class Leaderboard(commands.Cog):
         icons = [icon_map[get_result(r)] for r in game_history[-50:]]
         streak_line = "".join(icons)
 
+        # Streak считается только по играм, без ставок
         current_result = get_result(game_history[-1])
         streak_count = 0
         for r in reversed(game_history):
@@ -397,12 +400,30 @@ class Leaderboard(commands.Cog):
             elo_after = r.get("elo_after", "?")
             detail_lines.append(f"{icon} `{fmt} {mode_label}` {elo_str} ELO → **{elo_after}**")
 
+        # Последние ставки (до 10 штук)
+        recent_bets = bet_history[-10:]
+        bet_lines = []
+        for r in reversed(recent_bets):
+            ch = r.get("change", 0)
+            sign = "+" if ch > 0 else ""
+            elo_str = f"{sign}{ch}" if ch != 0 else "±0"
+            elo_after = r.get("elo_after", "?")
+            icon = "✅" if ch > 0 else "❌"
+            game_id = r.get("game_id", "?")
+            bet_lines.append(f"{icon} `Match #{game_id}` {elo_str} ELO → **{elo_after}**")
+
         total = len(game_history)
         wins   = sum(1 for r in game_history if get_result(r) == "win")
         losses = sum(1 for r in game_history if get_result(r) == "loss")
         draws  = sum(1 for r in game_history if get_result(r) == "draw")
         decisive = wins + losses
         wr = round(wins / decisive * 100) if decisive else 0
+
+        # Статистика ставок
+        bet_wins   = sum(1 for r in bet_history if r.get("change", 0) > 0)
+        bet_losses = sum(1 for r in bet_history if r.get("change", 0) < 0)
+        bet_elo_total = sum(r.get("change", 0) for r in bet_history)
+        bet_sign = "+" if bet_elo_total >= 0 else ""
 
         embed = discord.Embed(title=f"📊  Game History — {player['username']}", color=0x5865F2)
         embed.add_field(
@@ -420,6 +441,20 @@ class Leaderboard(commands.Cog):
             length += len(line) + 1
         chunk = "\n".join(lines_out)
         embed.add_field(name=f"Recent games — last {len(lines_out)} (detailed)", value=chunk or "—", inline=False)
+
+        # Блок ставок (только если есть история)
+        if bet_lines:
+            embed.add_field(
+                name=f"🎰 Recent bets (last {len(bet_lines)})",
+                value="\n".join(bet_lines),
+                inline=False,
+            )
+            embed.add_field(
+                name="🎰 Bet stats",
+                value=f"✅ {bet_wins} correct  ❌ {bet_losses} wrong  |  Total: **{bet_sign}{bet_elo_total} ELO**",
+                inline=False,
+            )
+
         embed.add_field(name="Current streak", value=streak_label, inline=True)
         embed.add_field(name="Total games", value=str(total), inline=True)
         embed.add_field(name="W / L / D", value=f"{wins} / {losses} / {draws}", inline=True)

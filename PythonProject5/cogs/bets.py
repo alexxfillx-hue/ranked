@@ -209,6 +209,15 @@ class Bets(commands.Cog):
         self._active_bets: dict[int, dict] = {}
         self._close_tasks: dict[int, asyncio.Task] = {}
 
+    async def cog_load(self):
+        """Добавляет колонку is_bet в elo_history если её нет."""
+        try:
+            await self.bot.db.pool.execute(
+                "ALTER TABLE elo_history ADD COLUMN IF NOT EXISTS is_bet BOOLEAN DEFAULT FALSE"
+            )
+        except Exception as e:
+            log.warning("Could not add is_bet column: %s", e)
+
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     async def _get_bets_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
@@ -497,8 +506,8 @@ class Bets(commands.Cog):
                 )
                 await db.pool.execute(
                     """
-                    INSERT INTO elo_history (discord_id, elo_before, elo_after, change, game_id)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO elo_history (discord_id, elo_before, elo_after, change, game_id, is_bet)
+                    VALUES ($1, $2, $3, $4, $5, TRUE)
                     """,
                     uid, old_elo, new_elo, delta, room_id,
                 )
