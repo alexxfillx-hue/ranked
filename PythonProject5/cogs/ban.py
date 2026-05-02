@@ -2,7 +2,7 @@
 import re
 import datetime
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from config import Config, RANKS
 
@@ -67,10 +67,10 @@ def _is_moderator(member: discord.Member) -> bool:
 
 # ── Хелпер: снять ранговые роли и выдать/снять BANNED ─────────────────────────
 
-async def _apply_ban_roles(guild: discord.Guild, member: discord.Member, ban: bool):
+async def _apply_ban_roles(guild: discord.Guild, member: discord.Member, ban: bool, bot=None):
     """
     ban=True  → снимает все ранговые роли, выдаёт BANNED
-    ban=False → снимает BANNED (ранговая роль восстановится при следующей смене ELO)
+    ban=False → снимает BANNED и возвращает ранговую роль по текущему ELO
     """
     banned_role = discord.utils.get(guild.roles, name="BANNED")
     rank_roles = {r[4] for r in RANKS}  # названия ранговых ролей из config
@@ -96,15 +96,73 @@ async def _apply_ban_roles(guild: discord.Guild, member: discord.Member, ban: bo
     except discord.Forbidden:
         pass  # нет прав — молча пропускаем
 
+    # При снятии бана — сразу восстанавливаем ранговую роль по текущему ELO
+    if not ban and bot is not None:
+        try:
+            from cogs.register import Register
+            reg_cog: Register = bot.cogs.get("Register")
+            if reg_cog:
+                player = await bot.db.get_player(member.id)
+                if player:
+                    await reg_cog._sync_rank_role(member, player["elo"])
+        except Exception:
+            pass
+
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class Ban(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.ban_expiry_loop.start()
+
+    def cog_unload(self):
+        self.ban_expiry_loop.cancel()
 
     def _is_guild(self, ctx) -> bool:
         return bool(ctx.guild and ctx.guild.id == Config.GUILD_ID)
+
+    # ── Фоновая задача: автоснятие истёкших банов ─────────────────────────────
+
+    @tasks.loop(minutes=1)
+    async def ban_expiry_loop(self):
+        """Каждую минуту проверяет истёкшие баны и снимает их автоматически."""
+        try:
+            expired = await self.bot.db.get_expired_bans()
+        except Exception:
+            return
+
+        if not expired:
+            return
+
+        guild = self.bot.get_guild(Config.GUILD_ID)
+        if not guild:
+            return
+
+        for ban_row in expired:
+            discord_id = ban_row["discord_id"]
+            await self.bot.db.remove_ban(discord_id)
+
+            member = guild.get_member(discord_id)
+            if member:
+                await _apply_ban_roles(guild, member, ban=False, bot=self.bot)
+                # Уведомляем игрока в ЛС
+                try:
+                    embed = discord.Embed(
+                        title="✅  Ваш бан истёк",
+                        color=0x2ECC71,
+                        description=(
+                            "Срок вашей блокировки на сервере истёк.\n"
+                            "Вы снова можете пользоваться всеми функциями бота."
+                        ),
+                    )
+                    await member.send(embed=embed)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+    @ban_expiry_loop.before_loop
+    async def before_ban_expiry_loop(self):
+        await self.bot.wait_until_ready()
 
     # ── !ban @игрок <длительность> ────────────────────────────────────────────
 
@@ -154,7 +212,7 @@ class Ban(commands.Cog):
         await self.bot.db.set_ban(member.id, banned_until, ctx.author.id, duration)
 
         # Меняем роли
-        await _apply_ban_roles(ctx.guild, member, ban=True)
+        await _apply_ban_roles(ctx.guild, member, ban=True, bot=self.bot)
 
         embed = discord.Embed(
             title="🔨  Игрок заблокирован",
@@ -209,7 +267,7 @@ class Ban(commands.Cog):
             return
 
         await self.bot.db.remove_ban(member.id)
-        await _apply_ban_roles(ctx.guild, member, ban=False)
+        await _apply_ban_roles(ctx.guild, member, ban=False, bot=self.bot)
 
         embed = discord.Embed(
             title="✅  Блокировка снята",
