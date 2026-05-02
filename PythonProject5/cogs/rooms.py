@@ -319,6 +319,7 @@ class LeaveWarningView(discord.ui.View):
                 await channel.delete(reason="Комната пуста")
             await db.delete_room(self.room_id)
             if rooms_cog:
+                await rooms_cog._delete_match_status(self.room_id, interaction.guild)
                 await rooms_cog._refresh_lobby()
             return
 
@@ -443,6 +444,7 @@ class ExitButton(discord.ui.Button):
                 await channel.delete(reason="Комната пуста")
             await db.delete_room(self.room_id)
             if rooms_cog:
+                await rooms_cog._delete_match_status(self.room_id, interaction.guild)
                 await rooms_cog._refresh_lobby()
             return
 
@@ -2144,6 +2146,7 @@ class Rooms(commands.Cog):
             await db.delete_room(room["room_id"])
             if channel:
                 await channel.delete(reason="Комната пуста")
+            await self._delete_match_status(room["room_id"], ctx.guild)
             await self._refresh_lobby()
             return
 
@@ -2243,6 +2246,7 @@ class Rooms(commands.Cog):
             if channel:
                 await channel.delete(reason="Комната пуста после кика")
             await db.delete_room(room["room_id"])
+            await self._delete_match_status(room["room_id"], guild)
             await ctx.send(f"✅ {member.display_name} кикнут. Комната удалена (все ушли).")
             await self._refresh_lobby()
             return
@@ -3180,6 +3184,7 @@ class Rooms(commands.Cog):
                     await asyncio.sleep(5)
                     await channel.delete(reason="Таймаут игры")
                 await db.delete_room(room["room_id"])
+                await self._delete_match_status(room["room_id"], guild)
 
             elif elapsed >= ping_minutes and not room["pinged_at"]:
                 if channel:
@@ -3231,6 +3236,7 @@ class Rooms(commands.Cog):
             await asyncio.sleep(3)
             await channel.delete()
         await db.delete_room(room_id)
+        await self._delete_match_status(room_id, guild)
         await ctx.send(f"✅ Комната #{room_id} расформирована.")
         await self._refresh_lobby()
 
@@ -3272,6 +3278,7 @@ class Rooms(commands.Cog):
                 pass
 
         await db.delete_room(room_id)
+        await self._delete_match_status(room_id, guild)
         await self._refresh_lobby()
         # Отвечаем в admin-канал если команда была в удалённом канале комнаты
         try:
