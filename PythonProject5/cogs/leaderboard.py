@@ -336,8 +336,8 @@ class Leaderboard(commands.Cog):
             return
         history = await self.bot.db.get_elo_history_simple(target.id)
         # Разделяем: ставки (is_bet=True) и обычные игры
-        game_history = [r for r in history if r.get("game_id") is not None and not r.get("is_bet")]
-        bet_history  = [r for r in history if r.get("is_bet")]
+        game_history = [r for r in history if r.get("game_id") is not None and not r.get("is_bet", False)]
+        bet_history  = [r for r in history if r.get("is_bet", False)]
         if not game_history:
             await ctx.send(f"**{player['username']}** has no games played yet.")
             return
