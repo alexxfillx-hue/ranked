@@ -31,7 +31,7 @@ from config import Config, get_rank
 log = logging.getLogger("bot.bets")
 
 # How long bets are open after the game starts (minutes)
-BET_WINDOW_MINUTES = 5
+BET_WINDOW_MINUTES = 3
 
 # ELO changes for correct / incorrect bet
 BET_WIN_ELO  = +2
@@ -277,6 +277,17 @@ class Bets(commands.Cog):
         elif not open_bets and winner_team is None and not cancelled:
             embed.description = "⏰ Betting window has closed."
 
+        # Show live bets while game is still in progress (open or closed window, before result)
+        if winner_team is None and not cancelled and bets:
+            team1_ids = {p["discord_id"] for p in team1}
+            live_t1 = [f"<@{uid}>" for uid, t in bets.items() if t == 1]
+            live_t2 = [f"<@{uid}>" for uid, t in bets.items() if t == 2]
+            bets_line = (
+                f"🔵 **{len(live_t1)}** — " + (", ".join(live_t1) if live_t1 else "—") +
+                f"\n🔴 **{len(live_t2)}** — " + (", ".join(live_t2) if live_t2 else "—")
+            )
+            embed.add_field(name="🎲 Current bets", value=bets_line, inline=False)
+
         if cancelled:
             if mod_cancelled:
                 embed.description = (
@@ -407,6 +418,7 @@ class Bets(commands.Cog):
             state["team1"], state["team2"],
             state["size"],  state["mode"],
             open_bets=False,
+            bets=state["bets"],
         )
         await msg.edit(
             content="⏰ Betting window closed.",
@@ -632,6 +644,25 @@ class Bets(commands.Cog):
         state["bets"][user.id] = team
         team_str = "🔵 Team 1" if team == 1 else "🔴 Team 2"
         log.info("Bet placed: user=%s room=%s team=%s", user.id, room_id, team)
+
+        # Update the public embed to show the new bet
+        guild = self.bot.get_guild(Config.GUILD_ID)
+        if guild:
+            channel = guild.get_channel(state["channel_id"])
+            if channel:
+                try:
+                    msg = await channel.fetch_message(state["message_id"])
+                    embed = self._build_bet_embed(
+                        room_id,
+                        state["team1"], state["team2"],
+                        state["size"],  state["mode"],
+                        open_bets=state["open"],
+                        bets=state["bets"],
+                    )
+                    await msg.edit(embed=embed)
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+
         return (
             f"✅ Bet confirmed on **{team_str}**!\n"
             f"🏆 Win → **{BET_WIN_ELO:+} ELO**  |  💀 Loss → **{BET_LOSE_ELO} ELO**"
