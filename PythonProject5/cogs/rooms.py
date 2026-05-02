@@ -55,6 +55,15 @@ class CreateRoomButton(discord.ui.Button):
             )
             return
 
+        if cog._rooms_locked:
+            is_mod = any(r.name == Config.MODERATOR_ROLE_NAME for r in interaction.user.roles)                      or interaction.user.guild_permissions.administrator
+            if not is_mod:
+                await interaction.response.send_message(
+                    "🔒 Создание комнат временно приостановлено модератором.",
+                    ephemeral=True,
+                )
+                return
+
         db = interaction.client.db
 
         # ── Ban check ────────────────────────────────────────────────
@@ -862,6 +871,8 @@ class Rooms(commands.Cog):
         # Защита лобби от параллельных/дублирующих обновлений
         self._lobby_lock = asyncio.Lock()
         self._lobby_refresh_pending = False
+        # Флаг блокировки создания комнат модераторами (!stop / !start)
+        self._rooms_locked = False
     def cog_unload(self):
         self.game_timeout_loop.cancel()
 
@@ -1174,6 +1185,10 @@ class Rooms(commands.Cog):
         if not self._is_guild(ctx):
             return
 
+        if self._rooms_locked and not self._is_mod(ctx.author):
+            await ctx.send("🔒 Создание комнат временно приостановлено модератором.")
+            return
+
         if size not in (1, 2, 3, 4):
             await ctx.send("Укажи размер: `1`, `2`, `3` или `4`.")
             return
@@ -1315,6 +1330,10 @@ class Rooms(commands.Cog):
     @commands.command(name="queue", aliases=["q"])
     async def queue(self, ctx: commands.Context, size: Optional[str] = None, mode: Optional[str] = None):
         if not self._is_guild(ctx):
+            return
+
+        if self._rooms_locked and not self._is_mod(ctx.author):
+            await ctx.send("🔒 Создание комнат временно приостановлено модератором.")
             return
 
         db = self.bot.db
@@ -1564,8 +1583,8 @@ class Rooms(commands.Cog):
         await db.set_player_team(room_id, cap2["discord_id"], 2)
         await db.set_captain(room_id, cap2["discord_id"], True)
 
-        first_pick_team = 1
-        second_pick_team_r = 2
+        first_pick_team = random.randint(1, 2)
+        second_pick_team_r = 2 if first_pick_team == 1 else 1
         await db.set_pick_turn(room_id, first_pick_team)
         await db.set_strong_side(room_id, second_pick_team_r)
         await db.update_room_status(room_id, "picking")
@@ -2257,8 +2276,8 @@ class Rooms(commands.Cog):
                                 "затем попробуйте снова."
                             )
                         return
-                    first_pick_team = 1
-                    second_pick_team = 2
+                    first_pick_team = random.randint(1, 2)
+                    second_pick_team = 2 if first_pick_team == 1 else 1
                     await db.set_pick_turn(room_id, first_pick_team)
                     await db.set_strong_side(room_id, second_pick_team)
                     await db.update_room_status(room_id, "picking")
@@ -3499,6 +3518,55 @@ class Rooms(commands.Cog):
             color=0xED4245,
         )
         embed.set_footer(text=f"Отменил: {ctx.author.display_name}")
+        embed.timestamp = discord.utils.utcnow()
+        await ctx.send(embed=embed)
+
+
+    # ── !stop / !start ───────────────────────────────────────────────────────
+
+    @commands.command(name="botstop")
+    async def stop_rooms(self, ctx: commands.Context):
+        """[Мод] Запрещает игрокам создавать новые комнаты."""
+        if not self._is_guild(ctx):
+            return
+        if not self._is_mod(ctx.author):
+            await ctx.send("❌ Только модераторы могут использовать эту команду.")
+            return
+        if self._rooms_locked:
+            await ctx.send("⚠️ Создание комнат уже приостановлено.")
+            return
+        self._rooms_locked = True
+        embed = discord.Embed(
+            title="🔒 Создание комнат приостановлено",
+            description=(
+                "Игроки больше не могут создавать или находить комнаты.\n"
+                "Текущие активные игры продолжаются в штатном режиме.\n\n"
+                "Для возобновления используйте `!botstart`."
+            ),
+            color=0xED4245,
+        )
+        embed.set_footer(text=f"Модератор: {ctx.author.display_name}")
+        embed.timestamp = discord.utils.utcnow()
+        await ctx.send(embed=embed)
+
+    @commands.command(name="botstart")
+    async def start_rooms(self, ctx: commands.Context):
+        """[Мод] Возобновляет создание комнат игроками."""
+        if not self._is_guild(ctx):
+            return
+        if not self._is_mod(ctx.author):
+            await ctx.send("❌ Только модераторы могут использовать эту команду.")
+            return
+        if not self._rooms_locked:
+            await ctx.send("⚠️ Создание комнат уже активно.")
+            return
+        self._rooms_locked = False
+        embed = discord.Embed(
+            title="✅ Создание комнат возобновлено",
+            description="Игроки снова могут создавать и находить комнаты.",
+            color=0x2ECC71,
+        )
+        embed.set_footer(text=f"Модератор: {ctx.author.display_name}")
         embed.timestamp = discord.utils.utcnow()
         await ctx.send(embed=embed)
 

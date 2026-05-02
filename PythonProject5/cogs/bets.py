@@ -34,7 +34,7 @@ log = logging.getLogger("bot.bets")
 BET_WINDOW_MINUTES = 3
 
 # ELO changes for correct / incorrect bet
-BET_WIN_ELO  = +2
+BET_WIN_ELO  = +3
 BET_LOSE_ELO = -5
 
 # Minimum ELO required to place a bet
