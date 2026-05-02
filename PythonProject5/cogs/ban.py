@@ -26,8 +26,14 @@ _UNIT_NAMES = {
 }
 
 
+_FOREVER_DATE = datetime.datetime(9999, 12, 31, 23, 59, 59)
+
+
 def parse_duration(raw: str) -> datetime.timedelta | None:
-    """Разбирает строку вида '15m', '2h', '3d', '1w' в timedelta. Возвращает None при ошибке."""
+    """Разбирает строку вида '15m', '2h', '3d', '1w' или 'forever' в timedelta.
+    Возвращает None при ошибке."""
+    if raw.strip().lower() == "forever":
+        return _FOREVER_DATE - datetime.datetime.utcnow()
     m = _DURATION_RE.match(raw.strip())
     if not m:
         return None
@@ -37,6 +43,8 @@ def parse_duration(raw: str) -> datetime.timedelta | None:
 
 def fmt_duration(raw: str) -> str:
     """Человекочитаемое описание для embed'а."""
+    if raw.strip().lower() == "forever":
+        return "♾️ Навсегда"
     m = _DURATION_RE.match(raw.strip())
     if not m:
         return raw
@@ -46,6 +54,8 @@ def fmt_duration(raw: str) -> str:
 
 def fmt_until(dt: datetime.datetime) -> str:
     """Форматирует дату окончания бана."""
+    if dt >= _FOREVER_DATE.replace(year=9999):
+        return "♾️ Навсегда"
     return dt.strftime("%d.%m.%Y %H:%M UTC")
 
 
@@ -110,8 +120,8 @@ class Ban(commands.Cog):
         if member is None or duration is None:
             await ctx.send(
                 "⚠️ Использование: `!ban @игрок <длительность>`\n"
-                "Длительность: `15m` (мин.), `2h` (часы), `3d` (дни), `1w` (неделя)\n"
-                "Пример: `!ban @игрок 15m`"
+                "Длительность: `15m` (мин.), `2h` (часы), `3d` (дни), `1w` (неделя), `forever` (навсегда)\n"
+                "Пример: `!ban @игрок 15m`  или  `!ban @игрок forever`"
             )
             return
 
@@ -119,7 +129,7 @@ class Ban(commands.Cog):
         if delta is None:
             await ctx.send(
                 "⚠️ Неверный формат длительности.\n"
-                "Примеры: `15m`, `2h`, `3d`, `1w`"
+                "Примеры: `15m`, `2h`, `3d`, `1w`, `forever`"
             )
             return
 
