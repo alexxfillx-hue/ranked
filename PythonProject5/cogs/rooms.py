@@ -49,6 +49,12 @@ class CreateRoomButton(discord.ui.Button):
             await interaction.response.send_message("Ошибка: cog не найден.", ephemeral=True)
             return
 
+        if self.size == 2 and self.mode == "cap":
+            await interaction.response.send_message(
+                "❌ Captain mode is not available for 2v2.", ephemeral=True
+            )
+            return
+
         db = interaction.client.db
         player = await db.get_player(interaction.user.id)
         if not player:
@@ -144,6 +150,8 @@ class CreateRoomView(discord.ui.View):
         super().__init__(timeout=None)
         for row_idx, size in enumerate([4, 3, 2]):
             for mode in ("team", "random", "cap"):
+                if size == 2 and mode == "cap":
+                    continue  # 2v2 cap is not allowed
                 self.add_item(CreateRoomButton(size, mode, row=row_idx))
         self.add_item(Create1v1Button(row=3))
 
@@ -1293,6 +1301,10 @@ class Rooms(commands.Cog):
             await ctx.send("Укажи режим: `team`, `random` или `cap`.")
             return
 
+        if size == 2 and mode == "cap":
+            await ctx.send("❌ Captain mode is not available for 2v2.")
+            return
+
         db = self.bot.db
         player = await db.get_player(ctx.author.id)
         if not player:
@@ -1457,12 +1469,16 @@ class Rooms(commands.Cog):
                     "**Командный** (выбираешь команду сам через `!pick`):\n"
                     "`!q 1 team` / `!q 2 team` / `!q 3 team` / `!q 4 team`\n\n"
                     "**Капитанский** (капитаны пикают игроков):\n"
-                    "`!q 1 cap` / `!q 2 cap` / `!q 3 cap` / `!q 4 cap`\n\n"
+                    "`!q 1 cap` / `!q 3 cap` / `!q 4 cap`\n\n"
                     "Сокращение: `!q 4 random`"
                 ),
                 color=0x5865F2,
             )
             await ctx.send(embed=embed)
+            return
+
+        if resolved_size == 2 and resolved_mode == "cap":
+            await ctx.send("❌ Captain mode is not available for 2v2.")
             return
 
         rooms = await db.get_available_rooms(size=resolved_size, mode=resolved_mode)
