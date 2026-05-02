@@ -464,18 +464,11 @@ class Bets(commands.Cog):
         except (discord.NotFound, discord.HTTPException):
             msg = None
 
-        # Game ended before betting window closed → cancel all bets
+        # If betting window is still open — close it now, then settle bets normally
         if state["open"]:
             state["open"] = False
-            embed = self._build_bet_embed(
-                room_id,
-                state["team1"], state["team2"],
-                state["size"],  state["mode"],
-                cancelled=True,
-            )
-            if msg:
-                await msg.edit(embed=embed, view=BetView(self, room_id, active=False))
-            return
+            if task:
+                task.cancel()
 
         # Apply bet outcomes
         db = self.bot.db
