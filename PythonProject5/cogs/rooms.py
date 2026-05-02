@@ -3146,6 +3146,12 @@ class Rooms(commands.Cog):
             await channel.send("🔨 [Мод] Игра принудительно расформирована.")
             await asyncio.sleep(3)
             await channel.delete()
+
+        # Notify bets system — roll back any bet ELO if needed
+        bets_cog = self.bot.cogs.get("Bets")
+        if bets_cog:
+            asyncio.create_task(bets_cog.on_game_cancelled(room_id))
+
         await db.delete_room(room_id)
         await ctx.send(f"✅ Комната #{room_id} расформирована.")
         await self._refresh_lobby()
@@ -3188,8 +3194,13 @@ class Rooms(commands.Cog):
                 pass
 
         await db.delete_room(room_id)
+
+        # Notify bets system — roll back any bet ELO if needed
+        bets_cog = self.bot.cogs.get("Bets")
+        if bets_cog:
+            asyncio.create_task(bets_cog.on_game_cancelled(room_id))
+
         await self._refresh_lobby()
-        # Отвечаем в admin-канал если команда была в удалённом канале комнаты
         try:
             await ctx.send(f"✅ Room **#{room_id}** deleted. {len(players)} player(s) removed.")
         except (discord.NotFound, discord.Forbidden):
@@ -3420,6 +3431,12 @@ class Rooms(commands.Cog):
         if "error" in result:
             await ctx.send(f"❌ Матч **#{game_id}** не найден. Возможно он уже был отменён.")
             return
+
+        # Notify bets system (ELO for bets is already rolled back by cancel_match
+        # via elo_history, but we log it for visibility)
+        bets_cog = self.bot.cogs.get("Bets")
+        if bets_cog:
+            asyncio.create_task(bets_cog.on_bet_match_cancelled(game_id))
 
         guild = ctx.guild
         affected = result["affected"]

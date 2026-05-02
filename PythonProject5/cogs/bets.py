@@ -153,10 +153,18 @@ class BetView(discord.ui.View):
             )
             return
 
-        # Can't bet on a game you are playing in
+        # Can't bet on a game you are playing in (check both in-memory state and DB)
         if uid in state["all_player_ids"]:
             await interaction.response.send_message(
                 "❌ You cannot bet on a match you are playing in.",
+                ephemeral=True,
+            )
+            return
+        # Also block players who are currently in ANY active room (waiting/full/picking/started)
+        active_room = await db.get_player_room(uid)
+        if active_room:
+            await interaction.response.send_message(
+                "❌ You cannot place bets while you are in an active room.",
                 ephemeral=True,
             )
             return
@@ -222,6 +230,7 @@ class Bets(commands.Cog):
         bets: Optional[dict] = None,
         elo_changes: Optional[dict] = None,  # uid → (old, new, delta)
         cancelled: bool = False,
+        mod_cancelled: bool = False,
     ) -> discord.Embed:
 
         mode_labels = {"team": "👥 Team", "random": "🎲 Random", "cap": "🎯 Captain"}
@@ -269,10 +278,16 @@ class Bets(commands.Cog):
             embed.description = "⏰ Betting window has closed."
 
         if cancelled:
-            embed.description = (
-                "❌ The game ended before the betting window closed — "
-                "all bets have been cancelled, no ELO was changed."
-            )
+            if mod_cancelled:
+                embed.description = (
+                    "🔨 The match was cancelled by a moderator — "
+                    "all bet ELO changes have been rolled back."
+                )
+            else:
+                embed.description = (
+                    "❌ The game ended before the betting window closed — "
+                    "all bets have been cancelled, no ELO was changed."
+                )
 
         # Results after game ends
         if winner_team is not None and bets and not cancelled:
@@ -500,6 +515,108 @@ class Bets(commands.Cog):
 
         if msg:
             await msg.edit(embed=embed, view=BetView(self, room_id, active=False))
+
+    async def on_game_cancelled(self, room_id: int):
+        """
+        Called from rooms.py when a moderator force-deletes an active room
+        (!delete / !mod_end). Cancels the bet embed and, if the betting window
+        had already closed and ELO was distributed, rolls it back.
+        """
+        state = self._active_bets.pop(room_id, None)
+
+        task = self._close_tasks.pop(room_id, None)
+        if task:
+            task.cancel()
+
+        guild = self.bot.get_guild(Config.GUILD_ID)
+        if not guild:
+            return
+
+        if state is None:
+            return
+
+        bets_channel = guild.get_channel(state["channel_id"])
+        if not bets_channel:
+            return
+
+        try:
+            msg = await bets_channel.fetch_message(state["message_id"])
+        except (discord.NotFound, discord.HTTPException):
+            msg = None
+
+        # If betting window was still open — no ELO was ever issued, just update embed
+        if state["open"]:
+            state["open"] = False
+            embed = self._build_bet_embed(
+                room_id,
+                state["team1"], state["team2"],
+                state["size"],  state["mode"],
+                cancelled=True,
+                mod_cancelled=True,
+            )
+            if msg:
+                await msg.edit(embed=embed, view=BetView(self, room_id, active=False))
+            return
+
+        # Betting window was already closed — check if ELO was actually distributed.
+        # on_game_end applies ELO; if the room was deleted BEFORE game ended,
+        # on_game_end was never called, so no ELO change occurred for bets.
+        # But to be safe, check elo_history and roll back any bet rows found.
+        db = self.bot.db
+        rolled_back: list[int] = []
+
+        for uid in state["bets"]:
+            row = await db.pool.fetchrow(
+                "SELECT id, elo_before FROM elo_history "
+                "WHERE discord_id=$1 AND game_id=$2 ORDER BY id DESC LIMIT 1",
+                uid, room_id,
+            )
+            if not row:
+                continue
+
+            await db.pool.execute(
+                "UPDATE players SET elo=$1 WHERE discord_id=$2",
+                row["elo_before"], uid,
+            )
+            await db.pool.execute("DELETE FROM elo_history WHERE id=$1", row["id"])
+
+            member = guild.get_member(uid)
+            if member:
+                try:
+                    from cogs.register import Register
+                    reg_cog: Register = self.bot.cogs.get("Register")
+                    if reg_cog:
+                        await reg_cog._sync_rank_role(member, row["elo_before"])
+                except Exception:
+                    pass
+            rolled_back.append(uid)
+
+        log.info(
+            "Mod-cancelled room #%s: rolled back bet ELO for %d user(s): %s",
+            room_id, len(rolled_back), rolled_back,
+        )
+
+        embed = self._build_bet_embed(
+            room_id,
+            state["team1"], state["team2"],
+            state["size"],  state["mode"],
+            cancelled=True,
+            mod_cancelled=True,
+        )
+        if msg:
+            await msg.edit(embed=embed, view=BetView(self, room_id, active=False))
+
+    async def on_bet_match_cancelled(self, game_id: int):
+        """
+        Called from rooms.py !cancel when a FINISHED match is cancelled by a mod.
+        db.cancel_match() already rolls back all elo_history rows for game_id,
+        which includes bet ELO rows (they share the same game_id). So no extra
+        DB work is needed here — we just log for visibility.
+        """
+        log.info(
+            "!cancel for finished match #%s: bet ELO already rolled back by cancel_match().",
+            game_id,
+        )
 
     # ── Internal: record the bet ──────────────────────────────────────────────
 
