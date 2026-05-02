@@ -56,6 +56,22 @@ class CreateRoomButton(discord.ui.Button):
             return
 
         db = interaction.client.db
+
+        # ── Ban check ────────────────────────────────────────────────
+        import datetime as _dt
+        _ban = await db.get_ban(interaction.user.id)
+        if _ban:
+            _until: _dt.datetime = _ban["banned_until"]
+            if _dt.datetime.utcnow() < _until:
+                _until_str = _until.strftime("%d.%m.%Y %H:%M UTC")
+                await interaction.response.send_message(
+                    f"🚫 You are banned until **{_until_str}**. You cannot create rooms.",
+                    ephemeral=True,
+                )
+                return
+            else:
+                await db.remove_ban(interaction.user.id)
+
         player = await db.get_player(interaction.user.id)
         if not player:
             await interaction.response.send_message(
@@ -189,6 +205,21 @@ class JoinButton(discord.ui.Button):
 
         bot = interaction.client
         db = bot.db
+
+        # ── Ban check ────────────────────────────────────────────────
+        import datetime as _dt
+        _ban = await db.get_ban(interaction.user.id)
+        if _ban:
+            _until: _dt.datetime = _ban["banned_until"]
+            if _dt.datetime.utcnow() < _until:
+                _until_str = _until.strftime("%d.%m.%Y %H:%M UTC")
+                await interaction.followup.send(
+                    f"🚫 You are banned until **{_until_str}**. You cannot join rooms.",
+                    ephemeral=True,
+                )
+                return
+            else:
+                await db.remove_ban(interaction.user.id)
 
         player = await db.get_player(interaction.user.id)
         if not player:
@@ -2269,6 +2300,16 @@ class Rooms(commands.Cog):
             await db.update_room_status(room_id, "started")
             await self._refresh_lobby()
 
+            # ── Notify bets system ────────────────────────────────────────
+            bets_cog = self.bot.cogs.get("Bets")
+            if bets_cog:
+                fresh_players = await db.get_room_players(room_id)
+                _t1 = [p for p in fresh_players if p["team"] == 1]
+                _t2 = [p for p in fresh_players if p["team"] == 2]
+                asyncio.create_task(
+                    bets_cog.on_game_start(room_id, _t1, _t2, room["size"], room["mode"])
+                )
+
             if room_channel:
                 mentions = " ".join(f"<@{p['discord_id']}>" for p in players)
                 caps = [p for p in players if p["is_captain"]]
@@ -2600,6 +2641,18 @@ class Rooms(commands.Cog):
 
         # FIX 4: забираем URL первого скрина до удаления из БД
         first_screenshot_url = self._last_screenshot_url.get(room_id)
+
+        # ── Notify bets system ────────────────────────────────────────────
+        bets_cog = self.bot.cogs.get("Bets")
+        if bets_cog:
+            _w_team = 0
+            if v1 == "win":
+                _w_team = 1
+            elif v1 == "lose":
+                _w_team = 2
+            asyncio.create_task(
+                bets_cog.on_game_end(room_id, _w_team, elo_changes)
+            )
 
         await db.delete_screenshots(room_id)
         await db.delete_room(room_id)
