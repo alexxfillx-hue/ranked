@@ -210,6 +210,47 @@ class Database:
                     created_at   TIMESTAMP DEFAULT NOW()
                 )"""
             )
+            # Миграция: колонка is_bet (добавлена системой ставок)
+            await conn.execute(
+                "ALTER TABLE elo_history ADD COLUMN IF NOT EXISTS is_bet BOOLEAN DEFAULT FALSE"
+            )
+            # Миграция: помечаем старые строки ставок (is_bet IS NULL/FALSE,
+            # но игрок не является участником матча в game_results с тем же game_id)
+            await conn.execute(
+                """
+                UPDATE elo_history eh
+                SET is_bet = TRUE
+                WHERE eh.game_id IS NOT NULL
+                  AND COALESCE(eh.is_bet, FALSE) = FALSE
+                  AND NOT EXISTS (
+                      SELECT 1 FROM game_results gr
+                      WHERE gr.discord_id = eh.discord_id
+                        AND gr.game_id    = eh.game_id
+                  )
+                """
+            )
+            # Миграция: пересчитываем wins/losses/draws/games_played из game_results
+            # (game_results не содержит ставок — только реальные игры)
+            await conn.execute(
+                """
+                UPDATE players p
+                SET
+                    wins         = s.wins,
+                    losses       = s.losses,
+                    draws        = s.draws,
+                    games_played = s.wins + s.losses + s.draws
+                FROM (
+                    SELECT
+                        discord_id,
+                        COUNT(*) FILTER (WHERE result = 'win')  AS wins,
+                        COUNT(*) FILTER (WHERE result = 'lose') AS losses,
+                        COUNT(*) FILTER (WHERE result = 'draw') AS draws
+                    FROM game_results
+                    GROUP BY discord_id
+                ) s
+                WHERE p.discord_id = s.discord_id
+                """
+            )
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -687,7 +728,8 @@ class Database:
         result выводится из знака change: >0 = win, <0 = lose, 0 = draw.
         """
         rows = await self.pool.fetch(
-            """SELECT id, game_id, elo_before, elo_after, change, mode, size, timestamp
+            """SELECT id, game_id, elo_before, elo_after, change, mode, size, timestamp,
+                      COALESCE(is_bet, FALSE) AS is_bet
                FROM elo_history
                WHERE discord_id=$1
                ORDER BY timestamp ASC, id ASC""",
