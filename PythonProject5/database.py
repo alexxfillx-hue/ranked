@@ -229,8 +229,9 @@ class Database:
                   )
                 """
             )
-            # Миграция: пересчитываем wins/losses/draws/games_played из game_results
-            # (game_results не содержит ставок — только реальные игры)
+            # Миграция: пересчитываем wins/losses/draws/games_played из game_results.
+            # game_results содержит по N строк на матч (player vs each opponent),
+            # поэтому считаем DISTINCT game_id чтобы получить 1 матч = 1 запись.
             await conn.execute(
                 """
                 UPDATE players p
@@ -242,9 +243,9 @@ class Database:
                 FROM (
                     SELECT
                         discord_id,
-                        COUNT(*) FILTER (WHERE result = 'win')  AS wins,
-                        COUNT(*) FILTER (WHERE result = 'lose') AS losses,
-                        COUNT(*) FILTER (WHERE result = 'draw') AS draws
+                        COUNT(DISTINCT game_id) FILTER (WHERE result = 'win')  AS wins,
+                        COUNT(DISTINCT game_id) FILTER (WHERE result = 'lose') AS losses,
+                        COUNT(DISTINCT game_id) FILTER (WHERE result = 'draw') AS draws
                     FROM game_results
                     GROUP BY discord_id
                 ) s
