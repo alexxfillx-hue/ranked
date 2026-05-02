@@ -251,8 +251,6 @@ class JoinButton(discord.ui.Button):
                 await db.update_room_status(self.room_id, "full")
                 if channel:
                     await channel.send("🎯 Комната заполнена! Нажмите **▶ Start** чтобы начать!")
-            await rooms_cog._post_or_update_match_status(self.room_id)
-
         if rooms_cog:
             await rooms_cog._refresh_room_embed(self.room_id)
             await rooms_cog._refresh_lobby()
@@ -327,7 +325,6 @@ class LeaveWarningView(discord.ui.View):
                 await channel.delete(reason="Комната пуста")
             await db.delete_room(self.room_id)
             if rooms_cog:
-                await rooms_cog._delete_match_status(self.room_id, interaction.guild)
                 await rooms_cog._refresh_lobby()
             return
 
@@ -452,7 +449,6 @@ class ExitButton(discord.ui.Button):
                 await channel.delete(reason="Комната пуста")
             await db.delete_room(self.room_id)
             if rooms_cog:
-                await rooms_cog._delete_match_status(self.room_id, interaction.guild)
                 await rooms_cog._refresh_lobby()
             return
 
@@ -835,9 +831,6 @@ class Rooms(commands.Cog):
         # Защита лобби от параллельных/дублирующих обновлений
         self._lobby_lock = asyncio.Lock()
         self._lobby_refresh_pending = False
-        # room_id → message_id живого статуса в канале match-results
-        self._status_message_ids: dict[int, int] = {}
-
     def cog_unload(self):
         self.game_timeout_loop.cancel()
 
@@ -883,87 +876,6 @@ class Rooms(commands.Cog):
         return channel
 
     # ── Live match status in results channel ─────────────────────
-
-    async def _delete_match_status(self, room_id: int, guild: discord.Guild):
-        """Remove the live status message for a room if it exists."""
-        msg_id = self._status_message_ids.pop(room_id, None)
-        if not msg_id:
-            return
-        try:
-            lobby_channel = discord.utils.find(
-                lambda c: Config.LOBBY_CHANNEL_NAME in c.name or c.name == Config.LOBBY_CHANNEL_NAME,
-                guild.text_channels,
-            )
-            if lobby_channel:
-                msg = await lobby_channel.fetch_message(msg_id)
-                await msg.delete()
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
-
-    async def _post_or_update_match_status(self, room_id: int):
-        """
-        Posts or edits a simple matchup message in the search-game (lobby) channel.
-        Shows who is playing against whom once the game has started.
-        Automatically deleted when the room finishes.
-        """
-        try:
-            db = self.bot.db
-            guild = self.bot.get_guild(Config.GUILD_ID)
-            if not guild:
-                return
-
-            room = await db.get_room(room_id)
-            if not room:
-                return
-
-            status = room["status"]
-            # Only show when the game is actually in progress
-            if status != "started":
-                return
-
-            players = await db.get_room_players(room_id)
-            mode = room["mode"] or "team"
-            size = room["size"] or 4
-
-            mode_labels = {"team": "👥 Team", "random": "🎲 Random", "cap": "🎯 Captain"}
-            mode_label = mode_labels.get(mode, mode)
-
-            team1 = [p for p in players if p["team"] == 1]
-            team2 = [p for p in players if p["team"] == 2]
-
-            t1_names = " · ".join(f"**{p['username']}**" for p in team1) or "—"
-            t2_names = " · ".join(f"**{p['username']}**" for p in team2) or "—"
-
-            embed = discord.Embed(
-                title=f"⚔️  Match #{room_id}  ·  {size}v{size}  ·  {mode_label}",
-                description=f"🔵 {t1_names}\n🆚\n🔴 {t2_names}",
-                color=0x57F287,
-            )
-            embed.timestamp = discord.utils.utcnow()
-
-            lobby_channel = discord.utils.find(
-                lambda c: Config.LOBBY_CHANNEL_NAME in c.name or c.name == Config.LOBBY_CHANNEL_NAME,
-                guild.text_channels,
-            )
-            if not lobby_channel:
-                return
-
-            existing_msg_id = self._status_message_ids.get(room_id)
-
-            if existing_msg_id:
-                try:
-                    existing_msg = await lobby_channel.fetch_message(existing_msg_id)
-                    await existing_msg.edit(embed=embed)
-                    return
-                except (discord.NotFound, discord.HTTPException):
-                    self._status_message_ids.pop(room_id, None)
-
-            new_msg = await lobby_channel.send(embed=embed)
-            self._status_message_ids[room_id] = new_msg.id
-
-        except Exception as e:
-            import logging as _logging
-            _logging.getLogger("bot").warning("_post_or_update_match_status error: %s", e)
 
     def _is_mod(self, member: discord.Member) -> bool:
         if member.guild_permissions.administrator:
@@ -1645,7 +1557,6 @@ class Rooms(commands.Cog):
             await channel.send(embed=embed)
             await self._send_pick_message(room_id, channel, first_pick_team)
 
-        await self._post_or_update_match_status(room_id)
 
     # ── FIX 1: _send_pick_message удаляет предыдущее сообщение с пиком ──
 
@@ -1908,7 +1819,6 @@ class Rooms(commands.Cog):
                 )
 
         await self._refresh_room_embed(room["room_id"])
-        await self._post_or_update_match_status(room["room_id"])
         try:
             await ctx.message.delete(delay=2)
         except (discord.Forbidden, discord.NotFound):
@@ -2039,7 +1949,6 @@ class Rooms(commands.Cog):
             if channel:
                 await channel.send("🎯 Команды сформированы! Нажмите **▶ Start** чтобы начать!")
                 await self._announce_strong_side(channel, room["room_id"])
-            await self._post_or_update_match_status(room["room_id"])
         else:
             if room["status"] == "full":
                 await db.update_room_status(room["room_id"], "waiting")
@@ -2100,7 +2009,6 @@ class Rooms(commands.Cog):
             await db.delete_room(room["room_id"])
             if channel:
                 await channel.delete(reason="Комната пуста")
-            await self._delete_match_status(room["room_id"], ctx.guild)
             await self._refresh_lobby()
             return
 
@@ -2126,7 +2034,6 @@ class Rooms(commands.Cog):
                 await db.set_ready(room["room_id"], 2, False)
                 for p in players:
                     await db.set_end_vote(room["room_id"], p["discord_id"], None)
-                await self._delete_match_status(room["room_id"], guild)
 
         await self._refresh_room_embed(room["room_id"])
         await ctx.send(
@@ -2201,7 +2108,6 @@ class Rooms(commands.Cog):
             if channel:
                 await channel.delete(reason="Комната пуста после кика")
             await db.delete_room(room["room_id"])
-            await self._delete_match_status(room["room_id"], guild)
             await ctx.send(f"✅ {member.display_name} кикнут. Комната удалена (все ушли).")
             await self._refresh_lobby()
             return
@@ -2390,7 +2296,6 @@ class Rooms(commands.Cog):
                 await room_channel.send(embed=start_embed)
 
             await self._refresh_room_embed(room_id)
-            await self._post_or_update_match_status(room_id)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -2702,7 +2607,6 @@ class Rooms(commands.Cog):
 
         results_channel = await self._get_or_create_results_channel(guild)
         # Удаляем live-статус перед финальным результатом
-        await self._delete_match_status(room_id, guild)
         result_msg = await results_channel.send(embed=results_embed)
 
         winner_team = 0
@@ -3139,7 +3043,6 @@ class Rooms(commands.Cog):
                     await asyncio.sleep(5)
                     await channel.delete(reason="Таймаут игры")
                 await db.delete_room(room["room_id"])
-                await self._delete_match_status(room["room_id"], guild)
 
             elif elapsed >= ping_minutes and not room["pinged_at"]:
                 if channel:
@@ -3191,7 +3094,6 @@ class Rooms(commands.Cog):
             await asyncio.sleep(3)
             await channel.delete()
         await db.delete_room(room_id)
-        await self._delete_match_status(room_id, guild)
         await ctx.send(f"✅ Комната #{room_id} расформирована.")
         await self._refresh_lobby()
 
@@ -3233,7 +3135,6 @@ class Rooms(commands.Cog):
                 pass
 
         await db.delete_room(room_id)
-        await self._delete_match_status(room_id, guild)
         await self._refresh_lobby()
         # Отвечаем в admin-канал если команда была в удалённом канале комнаты
         try:
