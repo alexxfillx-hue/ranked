@@ -290,7 +290,26 @@ class Database:
         )
         return _row(r)
 
-    async def get_player_by_username(self, username: str) -> _Row | None:
+    async def delete_player(self, discord_id: int) -> bool:
+        """
+        Полностью удаляет игрока из БД.
+        Порядок важен: сначала зависимые таблицы, потом players.
+        Возвращает True если игрок был найден и удалён, False если не найден.
+        """
+        async with self.pool.acquire() as conn:
+            player = await conn.fetchrow("SELECT 1 FROM players WHERE discord_id=$1", discord_id)
+            if not player:
+                return False
+            await conn.execute("DELETE FROM bans             WHERE discord_id=$1", discord_id)
+            await conn.execute("DELETE FROM room_players     WHERE discord_id=$1", discord_id)
+            await conn.execute("DELETE FROM elo_history      WHERE discord_id=$1", discord_id)
+            await conn.execute("DELETE FROM teammate_results WHERE discord_id=$1 OR teammate_id=$1", discord_id)
+            await conn.execute("DELETE FROM game_results     WHERE discord_id=$1 OR opponent_id=$1", discord_id)
+            await conn.execute("DELETE FROM reports          WHERE reporter_id=$1 OR reported_id=$1", discord_id)
+            await conn.execute("DELETE FROM players          WHERE discord_id=$1", discord_id)
+            return True
+
+    async def get_player_by_username(self, username: str) -> "_Row | None":
         r = await self.pool.fetchrow(
             "SELECT * FROM players WHERE LOWER(username)=LOWER($1)", username
         )
