@@ -59,7 +59,7 @@ class CreateRoomButton(discord.ui.Button):
             is_mod = any(r.name == Config.MODERATOR_ROLE_NAME for r in interaction.user.roles)                      or interaction.user.guild_permissions.administrator
             if not is_mod:
                 await interaction.response.send_message(
-                    "🔒 Создание комнат временно приостановлено модератором.",
+                    "🔒 Room creation has been temporarily suspended by a moderator.",
                     ephemeral=True,
                 )
                 return
@@ -1186,7 +1186,7 @@ class Rooms(commands.Cog):
             return
 
         if self._rooms_locked and not self._is_mod(ctx.author):
-            await ctx.send("🔒 Создание комнат временно приостановлено модератором.")
+            await ctx.send("🔒 Room creation has been temporarily suspended by a moderator.")
             return
 
         if size not in (1, 2, 3, 4):
@@ -1333,7 +1333,7 @@ class Rooms(commands.Cog):
             return
 
         if self._rooms_locked and not self._is_mod(ctx.author):
-            await ctx.send("🔒 Создание комнат временно приостановлено модератором.")
+            await ctx.send("🔒 Room creation has been temporarily suspended by a moderator.")
             return
 
         db = self.bot.db
@@ -3522,6 +3522,120 @@ class Rooms(commands.Cog):
         await ctx.send(embed=embed)
 
 
+    # ── !deleteprofile ────────────────────────────────────────────────────────
+
+    @commands.command(name="deleteprofile")
+    async def delete_profile(self, ctx: commands.Context, user_id: str = None):
+        """[Мод] Удаляет профиль игрока по Discord ID (для вышедших с сервера)."""
+        if not self._is_guild(ctx):
+            return
+        if not self._is_mod(ctx.author):
+            await ctx.send("❌ Only moderators can use this command.")
+            return
+
+        if user_id is None:
+            await ctx.send(
+                "❌ Укажи Discord ID игрока.\n"
+                "Пример: `!deleteprofile 123456789012345678`"
+            )
+            return
+
+        try:
+            discord_id = int(user_id.strip("<@!>"))
+        except ValueError:
+            await ctx.send("❌ Некорректный ID. Передай числовой Discord ID.")
+            return
+
+        # Проверяем что игрок есть в БД
+        player = await self.bot.db.get_player(discord_id)
+        if not player:
+            await ctx.send(f"❌ Игрок с ID `{discord_id}` не найден в базе данных.")
+            return
+
+        username = player["username"]
+        elo = player["elo"]
+
+        # Удаляем
+        deleted = await self.bot.db.delete_player(discord_id)
+        if not deleted:
+            await ctx.send(f"❌ Не удалось удалить игрока `{discord_id}`.")
+            return
+
+        embed = discord.Embed(
+            title="🗑️ Profile deleted",
+            description=(
+                f"Player **{username}** (ID: `{discord_id}`) has been removed from the database.\n"
+                f"ELO at deletion: **{elo}**"
+            ),
+            color=0xED4245,
+        )
+        embed.set_footer(text=f"Moderator: {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+
+    # ── !scanresults ─────────────────────────────────────────────────────────
+
+    @commands.command(name="scanresults")
+    async def scan_results(self, ctx: commands.Context):
+        """[Мод] Сканирует канал результатов и заполняет пустые ссылки в match_results."""
+        if not self._is_guild(ctx):
+            return
+        if not self._is_mod(ctx.author):
+            await ctx.send("❌ Только модераторы могут использовать эту команду.")
+            return
+
+        guild = ctx.guild
+        results_channel = await self._get_or_create_results_channel(guild)
+
+        status_msg = await ctx.send("🔍 Сканирую канал результатов...")
+
+        updated = 0
+        skipped = 0
+        not_found = 0
+
+        async for message in results_channel.history(limit=None, oldest_first=True):
+            if message.author.id != self.bot.user.id:
+                continue
+            if not message.embeds:
+                continue
+
+            embed = message.embeds[0]
+            if not embed.title or "Match #" not in embed.title:
+                continue
+
+            # Парсим game_id из заголовка "📋 Match #123  ·  ..."
+            try:
+                part = embed.title.split("Match #")[1]
+                game_id = int(part.split()[0].rstrip("·").strip())
+            except (IndexError, ValueError):
+                continue
+
+            # Проверяем запись в БД
+            match_row = await self.bot.db.get_match_result(game_id)
+            if not match_row:
+                not_found += 1
+                continue
+
+            # Пропускаем если ссылка уже есть
+            if match_row.get("result_message_id") and match_row.get("result_channel_id"):
+                skipped += 1
+                continue
+
+            # Обновляем
+            await self.bot.db.pool.execute(
+                """UPDATE match_results
+                   SET result_message_id=$1, result_channel_id=$2
+                   WHERE game_id=$3""",
+                message.id, results_channel.id, game_id,
+            )
+            updated += 1
+
+        await status_msg.edit(content=(
+            f"✅ Сканирование завершено.\n"
+            f"• Обновлено: **{updated}**\n"
+            f"• Уже были ссылки: **{skipped}**\n"
+            f"• Не найдено в БД: **{not_found}**"
+        ))
+
     # ── !stop / !start ───────────────────────────────────────────────────────
 
     @commands.command(name="botstop")
@@ -3533,19 +3647,19 @@ class Rooms(commands.Cog):
             await ctx.send("❌ Только модераторы могут использовать эту команду.")
             return
         if self._rooms_locked:
-            await ctx.send("⚠️ Создание комнат уже приостановлено.")
+            await ctx.send("⚠️ Room creation is already suspended.")
             return
         self._rooms_locked = True
         embed = discord.Embed(
-            title="🔒 Создание комнат приостановлено",
+            title="🔒 Room creation suspended",
             description=(
-                "Игроки больше не могут создавать или находить комнаты.\n"
-                "Текущие активные игры продолжаются в штатном режиме.\n\n"
-                "Для возобновления используйте `!botstart`."
+                "Players can no longer create or find rooms.\n"
+                "Ongoing active games continue as normal.\n\n"
+                "To resume, use `!botstart`."
             ),
             color=0xED4245,
         )
-        embed.set_footer(text=f"Модератор: {ctx.author.display_name}")
+        embed.set_footer(text=f"Moderator: {ctx.author.display_name}")
         embed.timestamp = discord.utils.utcnow()
         await ctx.send(embed=embed)
 
@@ -3558,15 +3672,15 @@ class Rooms(commands.Cog):
             await ctx.send("❌ Только модераторы могут использовать эту команду.")
             return
         if not self._rooms_locked:
-            await ctx.send("⚠️ Создание комнат уже активно.")
+            await ctx.send("⚠️ Room creation is already active.")
             return
         self._rooms_locked = False
         embed = discord.Embed(
-            title="✅ Создание комнат возобновлено",
-            description="Игроки снова могут создавать и находить комнаты.",
+            title="✅ Room creation resumed",
+            description="Players can create and find rooms again.",
             color=0x2ECC71,
         )
-        embed.set_footer(text=f"Модератор: {ctx.author.display_name}")
+        embed.set_footer(text=f"Moderator: {ctx.author.display_name}")
         embed.timestamp = discord.utils.utcnow()
         await ctx.send(embed=embed)
 
