@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 from config import Config, get_rank
 from utils.elo import calculate_elo, team_avg
 from utils.embeds import room_embed
+from utils.prediction import match_prediction_embed
 
 
 # ────────────────────────────────────────────────────────────────
@@ -1486,18 +1487,27 @@ class Rooms(commands.Cog):
         await db.update_room_status(room_id, "full")
         await self._refresh_lobby()
 
+        # Сохраняем strong_side в БД
+        strong_team = random.randint(1, 2)
+        await db.set_strong_side(room_id, strong_team)
+
         if channel:
             t1_mentions = " ".join(f"<@{p['discord_id']}>" for p in team1)
             t2_mentions = " ".join(f"<@{p['discord_id']}>" for p in team2)
-            strong_team = random.randint(1, 2)
             t1_name = "🔵 Team 1 ⚔️ (strong side)" if strong_team == 1 else "🔵 Team 1"
             t2_name = "🔴 Team 2 ⚔️ (strong side)" if strong_team == 2 else "🔴 Team 2"
+            strong_label = "🔵 Team 1" if strong_team == 1 else "🔴 Team 2"
             embed = discord.Embed(
                 title="🎲 Teams assigned randomly!",
                 color=0x9B59B6,
             )
             embed.add_field(name=t1_name, value=t1_mentions, inline=False)
             embed.add_field(name=t2_name, value=t2_mentions, inline=False)
+            embed.add_field(
+                name="⚔️ Strong side",
+                value=f"**{strong_label}** plays the strong side!",
+                inline=False,
+            )
             await channel.send(embed=embed)
             await channel.send("✅ Captains, press **▶ Start** to begin!")
 
@@ -2341,6 +2351,18 @@ class Rooms(commands.Cog):
                 caps = [p for p in players if p["is_captain"]]
                 cap_mentions = " ".join(f"<@{p['discord_id']}>" for p in caps)
 
+                # ── Strong side для team-режима (random объявляет в _randomize_teams) ──
+                if room["mode"] == "team":
+                    strong_team = random.randint(1, 2)
+                    await db.set_strong_side(room_id, strong_team)
+                    strong_label = "🔵 Team 1" if strong_team == 1 else "🔴 Team 2"
+                    strong_embed = discord.Embed(
+                        title="⚔️ Strong side assigned!",
+                        description=f"**{strong_label}** plays the **STRONG SIDE**!",
+                        color=0x9B59B6,
+                    )
+                    await room_channel.send(embed=strong_embed)
+
                 if room["mode"] in ("team", "random"):
                     screenshot_note = (
                         "📸 **When the game ends** — any player must send a screenshot of the result in this channel.\n"
@@ -2357,6 +2379,42 @@ class Rooms(commands.Cog):
                     color=0x57F287,
                 )
                 await room_channel.send(embed=start_embed)
+
+                # ── Прогноз матча ────────────────────────────────────────
+                try:
+                    fresh_players = await db.get_room_players(room_id)
+                    t1_rp = [p for p in fresh_players if p["team"] == 1]
+                    t2_rp = [p for p in fresh_players if p["team"] == 2]
+
+                    full1 = []
+                    for p in t1_rp:
+                        fp = await db.get_player(p["discord_id"])
+                        if fp:
+                            fp = dict(fp)
+                            fp["is_captain"] = bool(p["is_captain"])
+                            full1.append(fp)
+
+                    full2 = []
+                    for p in t2_rp:
+                        fp = await db.get_player(p["discord_id"])
+                        if fp:
+                            fp = dict(fp)
+                            fp["is_captain"] = bool(p["is_captain"])
+                            full2.append(fp)
+
+                    if full1 and full2:
+                        pred_embed = match_prediction_embed(
+                            room_id=room_id,
+                            team1=full1,
+                            team2=full2,
+                            size=room["size"],
+                            mode=room["mode"],
+                        )
+                        await room_channel.send(embed=pred_embed)
+                except Exception as pred_err:
+                    import logging
+                    logging.getLogger("bot").warning(f"Prediction embed error: {pred_err}")
+                # ─────────────────────────────────────────────────────────
 
             await self._refresh_room_embed(room_id)
         except Exception as e:
