@@ -876,6 +876,16 @@ class Database:
             game_id, winner_team, mode, size, result_message_id, result_channel_id,
         )
 
+    async def get_match_results_bulk(self, game_ids: list[int]) -> dict[int, "_Row"]:
+        """Возвращает dict {game_id: row} для списка game_id одним запросом."""
+        if not game_ids:
+            return {}
+        rows = await self.pool.fetch(
+            "SELECT * FROM match_results WHERE game_id = ANY($1::int[])",
+            game_ids,
+        )
+        return {row["game_id"]: _row(row) for row in rows}
+
     async def get_match_result(self, game_id: int) -> _Row | None:
         r = await self.pool.fetchrow(
             "SELECT * FROM match_results WHERE game_id=$1", game_id
