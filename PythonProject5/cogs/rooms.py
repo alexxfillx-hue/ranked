@@ -2373,14 +2373,8 @@ class Rooms(commands.Cog):
                         f"📸 **When the game ends**, {cap_mentions} — please send a screenshot of the result in this channel.\n"
                         "After the screenshot is received, the **Win / Draw / Loss** buttons will appear."
                     )
-                start_embed = discord.Embed(
-                    title="🚀 GAME STARTED!",
-                    description=f"{mentions}\n\n{screenshot_note}",
-                    color=0x57F287,
-                )
-                await room_channel.send(embed=start_embed)
-
-                # ── Прогноз матча ────────────────────────────────────────
+                # ── Build prediction inline with start embed ───────────
+                pred_field = None
                 try:
                     fresh_players = await db.get_room_players(room_id)
                     t1_rp = [p for p in fresh_players if p["team"] == 1]
@@ -2403,18 +2397,36 @@ class Rooms(commands.Cog):
                             full2.append(fp)
 
                     if full1 and full2:
-                        pred_embed = match_prediction_embed(
-                            room_id=room_id,
-                            team1=full1,
-                            team2=full2,
-                            size=room["size"],
-                            mode=room["mode"],
+                        from utils.prediction import calculate_win_chance, _bar
+                        chance1, chance2 = calculate_win_chance(full1, full2)
+                        bar1 = _bar(chance1)
+                        bar2 = _bar(chance2)
+                        if chance1 > chance2:
+                            fav = "🔵 Team 1"
+                        elif chance2 > chance1:
+                            fav = "🔴 Team 2"
+                        else:
+                            fav = "⚖️ Even odds"
+                        mode_names = {"team": "👥 Team", "random": "🎲 Random", "cap": "🎯 Captain", "pick": "🎯 Captain"}
+                        mode_label = mode_names.get(room["mode"], room["mode"])
+                        pred_field = (
+                            f"🔵 `{bar1}` **{chance1}%**\n"
+                            f"🔴 `{bar2}` **{chance2}%**\n"
+                            f"-# Favourite: {fav}  ·  Mode: {mode_label}"
                         )
-                        await room_channel.send(embed=pred_embed)
                 except Exception as pred_err:
                     import logging
                     logging.getLogger("bot").warning(f"Prediction embed error: {pred_err}")
                 # ─────────────────────────────────────────────────────────
+
+                start_embed = discord.Embed(
+                    title="🚀 GAME STARTED!",
+                    description=f"{mentions}\n\n{screenshot_note}",
+                    color=0x57F287,
+                )
+                if pred_field:
+                    start_embed.add_field(name="📊 Win Chance", value=pred_field, inline=False)
+                await room_channel.send(embed=start_embed)
 
             await self._refresh_room_embed(room_id)
         except Exception as e:
