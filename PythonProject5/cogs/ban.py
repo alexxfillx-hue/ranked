@@ -19,10 +19,10 @@ _UNIT_SECONDS = {
 }
 
 _UNIT_NAMES = {
-    "m": "мин.",
-    "h": "ч.",
-    "d": "дн.",
-    "w": "нед.",
+    "m": "min.",
+    "h": "hr.",
+    "d": "day(s)",
+    "w": "week(s)",
 }
 
 
@@ -44,7 +44,7 @@ def parse_duration(raw: str) -> datetime.timedelta | None:
 def fmt_duration(raw: str) -> str:
     """Человекочитаемое описание для embed'а."""
     if raw.strip().lower() == "forever":
-        return "♾️ Навсегда"
+        return "♾️ Forever"
     m = _DURATION_RE.match(raw.strip())
     if not m:
         return raw
@@ -55,7 +55,7 @@ def fmt_duration(raw: str) -> str:
 def fmt_until(dt: datetime.datetime) -> str:
     """Форматирует дату окончания бана."""
     if dt >= _FOREVER_DATE.replace(year=9999):
-        return "♾️ Навсегда"
+        return "♾️ Forever"
     return dt.strftime("%d.%m.%Y %H:%M UTC")
 
 
@@ -149,11 +149,11 @@ class Ban(commands.Cog):
                 # Уведомляем игрока в ЛС
                 try:
                     embed = discord.Embed(
-                        title="✅  Ваш бан истёк",
+                        title="✅  Your ban has expired",
                         color=0x2ECC71,
                         description=(
-                            "Срок вашей блокировки на сервере истёк.\n"
-                            "Вы снова можете пользоваться всеми функциями бота."
+                            "Your ban on this server has expired.\n"
+                            "You can use all bot features again."
                         ),
                     )
                     await member.send(embed=embed)
@@ -172,38 +172,38 @@ class Ban(commands.Cog):
             return
 
         if not _is_moderator(ctx.author):
-            await ctx.send("❌ Только модераторы могут использовать эту команду.")
+            await ctx.send("❌ Only moderators can use this command.")
             return
 
         if member is None or duration is None:
             await ctx.send(
-                "⚠️ Использование: `!ban @игрок <длительность>`\n"
-                "Длительность: `15m` (мин.), `2h` (часы), `3d` (дни), `1w` (неделя), `forever` (навсегда)\n"
-                "Пример: `!ban @игрок 15m`  или  `!ban @игрок forever`"
+                "⚠️ Usage: `!ban @player <duration>`\n"
+                "Duration: `15m` (minutes), `2h` (hours), `3d` (days), `1w` (weeks), `forever`\n"
+                "Example: `!ban @player 15m`  or  `!ban @player forever`"
             )
             return
 
         delta = parse_duration(duration)
         if delta is None:
             await ctx.send(
-                "⚠️ Неверный формат длительности.\n"
-                "Примеры: `15m`, `2h`, `3d`, `1w`, `forever`"
+                "⚠️ Invalid duration format.\n"
+                "Examples: `15m`, `2h`, `3d`, `1w`, `forever`"
             )
             return
 
         # Нельзя банить модератора
         if _is_moderator(member):
-            await ctx.send("❌ Нельзя заблокировать модератора.")
+            await ctx.send("❌ You cannot ban a moderator.")
             return
 
         # Нельзя банить самого себя
         if member.id == ctx.author.id:
-            await ctx.send("❌ Нельзя заблокировать самого себя.")
+            await ctx.send("❌ You cannot ban yourself.")
             return
 
         player = await self.bot.db.get_player(member.id)
         if not player:
-            await ctx.send(f"❌ Игрок {member.mention} не зарегистрирован.")
+            await ctx.send(f"❌ Player {member.mention} is not registered.")
             return
 
         banned_until = datetime.datetime.utcnow() + delta
@@ -215,13 +215,13 @@ class Ban(commands.Cog):
         await _apply_ban_roles(ctx.guild, member, ban=True, bot=self.bot)
 
         embed = discord.Embed(
-            title="🔨  Игрок заблокирован",
+            title="🔨  Player banned",
             color=0xFF0000,
         )
-        embed.add_field(name="👤 Игрок", value=member.mention, inline=True)
-        embed.add_field(name="⏱ Длительность", value=fmt_duration(duration), inline=True)
-        embed.add_field(name="📅 До", value=fmt_until(banned_until), inline=True)
-        embed.add_field(name="🛡 Модератор", value=ctx.author.mention, inline=True)
+        embed.add_field(name="👤 Player", value=member.mention, inline=True)
+        embed.add_field(name="⏱ Duration", value=fmt_duration(duration), inline=True)
+        embed.add_field(name="📅 Until", value=fmt_until(banned_until), inline=True)
+        embed.add_field(name="🛡 Moderator", value=ctx.author.mention, inline=True)
         embed.set_footer(text=f"ID: {member.id}")
 
         await ctx.send(embed=embed)
@@ -229,12 +229,12 @@ class Ban(commands.Cog):
         # Уведомляем самого игрока в ЛС (если возможно)
         try:
             dm_embed = discord.Embed(
-                title="🔨  Вы заблокированы на этом сервере",
+                title="🔨  You have been banned on this server",
                 color=0xFF0000,
                 description=(
-                    f"**Длительность:** {fmt_duration(duration)}\n"
-                    f"**До:** {fmt_until(banned_until)}\n\n"
-                    "До окончания бана вы не можете пользоваться функциями бота."
+                    f"**Duration:** {fmt_duration(duration)}\n"
+                    f"**Until:** {fmt_until(banned_until)}\n\n"
+                    "You cannot use bot features until your ban expires."
                 ),
             )
             await member.send(embed=dm_embed)
@@ -249,37 +249,37 @@ class Ban(commands.Cog):
             return
 
         if not _is_moderator(ctx.author):
-            await ctx.send("❌ Только модераторы могут использовать эту команду.")
+            await ctx.send("❌ Only moderators can use this command.")
             return
 
         if member is None:
-            await ctx.send("⚠️ Использование: `!unban @игрок`")
+            await ctx.send("⚠️ Usage: `!unban @player`")
             return
 
         player = await self.bot.db.get_player(member.id)
         if not player:
-            await ctx.send(f"❌ Игрок {member.mention} не зарегистрирован.")
+            await ctx.send(f"❌ Player {member.mention} is not registered.")
             return
 
         ban_info = await self.bot.db.get_ban(member.id)
         if not ban_info:
-            await ctx.send(f"ℹ️ {member.mention} не заблокирован.")
+            await ctx.send(f"ℹ️ {member.mention} is not banned.")
             return
 
         await self.bot.db.remove_ban(member.id)
         await _apply_ban_roles(ctx.guild, member, ban=False, bot=self.bot)
 
         embed = discord.Embed(
-            title="✅  Блокировка снята",
+            title="✅  Ban lifted",
             color=0x2ECC71,
         )
-        embed.add_field(name="👤 Игрок", value=member.mention, inline=True)
-        embed.add_field(name="🛡 Модератор", value=ctx.author.mention, inline=True)
+        embed.add_field(name="👤 Player", value=member.mention, inline=True)
+        embed.add_field(name="🛡 Moderator", value=ctx.author.mention, inline=True)
         await ctx.send(embed=embed)
 
         # Уведомляем игрока
         try:
-            await member.send("✅ Ваша блокировка на сервере снята. Вы снова можете пользоваться ботом.")
+            await member.send("✅ Your ban on this server has been lifted. You can use the bot again.")
         except (discord.Forbidden, discord.HTTPException):
             pass
 
