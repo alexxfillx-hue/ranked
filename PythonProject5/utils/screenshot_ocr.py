@@ -314,20 +314,21 @@ def _nick_found_in_ocr(nick: str, ocr_candidates: list[str], ocr_full_norm: str,
 
     # 2. Поиск по строкам: вырезаем тег из каждой строки и сравниваем нормализованный результат.
     #    Это решает случай "[Bull] Chapella" где _normalize сливает тег с ником в одно слово.
+    # Компилируем pattern один раз для шагов 2 и 2б.
+    _boundary_pattern = re.compile(
+        r"(?<![a-zA-Z0-9_Ѐ-ӿ])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_Ѐ-ӿ])"
+    )
     if ocr_lines:
         for line in ocr_lines:
             stripped = _strip_tag(line.strip())
             line_norm = _normalize(stripped)
             if line_norm == nick_norm:
                 return True
-            # Ник как подстрока строки с word-boundary
-            pattern_line = r"(?<![a-zA-Z0-9_Ѐ-ӿ])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_Ѐ-ӿ])"
-            if re.search(pattern_line, line_norm):
+            if _boundary_pattern.search(line_norm):
                 return True
 
     # 2б. Ник как отдельное слово в полном тексте (word-boundary через regex)
-    pattern = r"(?<![a-zA-Z0-9_Ѐ-ӿ])" + re.escape(nick_norm) + r"(?![a-zA-Z0-9_Ѐ-ӿ])"
-    if re.search(pattern, ocr_full_norm):
+    if _boundary_pattern.search(ocr_full_norm):
         return True
 
     # 3. Расстояние Левенштейна ≤ 2 — только для длинных ников (≥ 5 символов)
@@ -441,7 +442,7 @@ def _count_nicks_on_screenshot(ocr_text: str, all_known_players: list[dict]) -> 
     return len(found_nicks)
 
 
-def _validate_players(players: list[dict], matched: list[str], ocr_text: str | None = None) -> Optional[ValidationError]:
+def _validate_players(players: list[dict], matched: list[str], ocr_text: str | None = None, ocr_candidates: list[str] | None = None) -> Optional[ValidationError]:
     """
     СТРОГАЯ проверка скрина:
 
@@ -468,17 +469,10 @@ def _validate_players(players: list[dict], matched: list[str], ocr_text: str | N
         )
 
     # ── Шаг 1: проверка количества ников на скрине ──────────────────────────
-    # Считаем сколько ников из этой комнаты OCR нашёл на скрине.
-    # Если больше чем нужно → скрин от другого матча (больше игроков).
-    # Например: 1v1 комната (2 игрока), но на скрине найдены 3 ника из комнаты
-    # (такое возможно если в комнате были все 3 как known_players).
-    # Ключевой случай: все игроки комнаты + чужой игрок → matched == total_expected,
-    # но _count_nicks_on_screenshot вернёт total_expected т.к. чужой не в списке.
-    # Поэтому главная защита — сравнение matched с total_expected СТРОГО (==).
     if ocr_text is not None:
-        nicks_found = _count_nicks_on_screenshot(ocr_text, players)
-        ocr_candidates = _extract_ocr_names(ocr_text)
-        nick_like = [c for c in ocr_candidates if len(c) >= 2]
+        nicks_found = len(matched)
+        _cands = ocr_candidates if ocr_candidates is not None else _extract_ocr_names(ocr_text)
+        nick_like = [c for c in _cands if len(c) >= 2]
         total_on_screen = len(nick_like)
 
         # Считаем сколько из найденных OCR-токенов совпадают с игроками комнаты
@@ -733,13 +727,23 @@ async def analyze_screenshot(
         return None
 
     # 1. Ищем ники игроков в OCR-тексте (с игнорированием тегов)
-    matched = _match_players(ocr_text, players)
+    ocr_candidates = _extract_ocr_names(ocr_text)
+    ocr_lines_clean = [ln for ln in ocr_text.splitlines() if not _UID_LINE_RE.search(ln)]
+    ocr_text_clean = "\n".join(ocr_lines_clean)
+    ocr_full_norm  = _normalize(ocr_text_clean)
+
+    matched = []
+    for p in players:
+        nick = p["username"]
+        if _nick_found_in_ocr(nick, ocr_candidates, ocr_full_norm, ocr_lines=ocr_lines_clean):
+            matched.append(nick)
+
     team_players = [p for p in players if p["team"] in (1, 2)]
     log.info("OCR matched players: %s / expected: %s",
              matched, [p["username"] for p in team_players])
 
     # 2. Строгая валидация: все ли игроки комнаты есть на скрине
-    err = _validate_players(players, matched, ocr_text)
+    err = _validate_players(players, matched, ocr_text, ocr_candidates=ocr_candidates)
     if err is not None:
         log.info("OCR validation failed: %s (found %d/%d)",
                  err.reason, err.found_count, err.expected_count)
