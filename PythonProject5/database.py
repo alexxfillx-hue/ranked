@@ -302,6 +302,12 @@ class Database:
                 return False
             await conn.execute("DELETE FROM bans             WHERE discord_id=$1", discord_id)
             await conn.execute("DELETE FROM room_players     WHERE discord_id=$1", discord_id)
+            # Удаляем комнаты созданные игроком (room_players других участников этих комнат тоже)
+            room_ids = await conn.fetch("SELECT room_id FROM rooms WHERE created_by=$1", discord_id)
+            for row in room_ids:
+                await conn.execute("DELETE FROM room_players      WHERE room_id=$1", row["room_id"])
+                await conn.execute("DELETE FROM room_screenshots  WHERE room_id=$1", row["room_id"])
+            await conn.execute("DELETE FROM rooms            WHERE created_by=$1", discord_id)
             await conn.execute("DELETE FROM elo_history      WHERE discord_id=$1", discord_id)
             await conn.execute("DELETE FROM teammate_results WHERE discord_id=$1 OR teammate_id=$1", discord_id)
             await conn.execute("DELETE FROM game_results     WHERE discord_id=$1 OR opponent_id=$1", discord_id)
