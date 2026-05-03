@@ -336,8 +336,8 @@ class Leaderboard(commands.Cog):
             return
         history = await self.bot.db.get_elo_history_simple(target.id)
         # Разделяем: ставки (is_bet=True) и обычные игры
-        game_history = [r for r in history if r.get("game_id") is not None and not r.get("is_bet", False)]
-        bet_history  = [r for r in history if r.get("is_bet", False)]
+        game_history = [r for r in history if r.get("game_id") is not None and not r.get("is_bet")]
+        bet_history  = [r for r in history if r.get("is_bet")]
         if not game_history:
             await ctx.send(f"**{player['username']}** has no games played yet.")
             return
@@ -387,6 +387,10 @@ class Leaderboard(commands.Cog):
         mode_labels = {"team": "👥 team", "random": "🎲 rand", "cap": "🎯 cap", None: "❓"}
         recent = game_history[-30:]
         detail_lines = []
+        # Загружаем ссылки на сообщения результатов одним запросом
+        recent_game_ids = [r["game_id"] for r in recent if r.get("game_id")]
+        match_results_map = await self.bot.db.get_match_results_bulk(recent_game_ids)
+
         for r in reversed(recent):
             res = get_result(r)
             icon = icon_map[res]
@@ -398,7 +402,18 @@ class Leaderboard(commands.Cog):
             mode_label = mode_labels.get(mode, "❓")
             fmt = f"{size}v{size}" if size else "?v?"
             elo_after = r.get("elo_after", "?")
-            detail_lines.append(f"{icon} `{fmt} {mode_label}` {elo_str} ELO → **{elo_after}**")
+            game_id = r.get("game_id")
+            mr = match_results_map.get(game_id) if game_id else None
+            if mr and mr.get("result_channel_id") and mr.get("result_message_id"):
+                link = (
+                    f"https://discord.com/channels/{Config.GUILD_ID}"
+                    f"/{mr['result_channel_id']}/{mr['result_message_id']}"
+                )
+                detail_lines.append(
+                    f"{icon} [{fmt} {mode_label}]({link}) {elo_str} ELO → **{elo_after}**"
+                )
+            else:
+                detail_lines.append(f"{icon} `{fmt} {mode_label}` {elo_str} ELO → **{elo_after}**")
 
         # Последние ставки (до 10 штук)
         recent_bets = bet_history[-10:]
